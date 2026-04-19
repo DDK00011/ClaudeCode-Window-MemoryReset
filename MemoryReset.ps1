@@ -545,7 +545,10 @@ function Show-MemoryDiagnostics {
             Write-Host (" · 'Memory Compression' process usage: {0,8:N1} MB" -f $compMB) -ForegroundColor Yellow
             Write-Host "   → Can flush in -Deep mode"
         } else {
-            Write-Host " · No process information for 'Memory Compression' (requires administrator privileges or is hidden in some builds)" -ForegroundColor DarkGray
+            # "Memory Compression" is a protected system process — enumerate failure is normal without administrator privileges
+            $hint = if (Test-IsAdmin) { 'Hidden system process on some Windows builds' }
+                    else              { 'Administrator privileges required (currently read-only mode)' }
+            Write-Host " · Cannot directly measure 'Memory Compression' process ($hint)" -ForegroundColor DarkGray
         }
     } catch {
         Write-Host " [!] MMAgent query failed: $($_.Exception.Message)" -ForegroundColor Yellow
@@ -595,24 +598,50 @@ function Invoke-DeepRecovery {
 
     # A1. Memory Compression Store flush
     #     Principle: MemoryCompression is disabled then enabled again to release compressed pages
-    #     Warning: temporary memory usage spike possible (during decompression) → called after standby cleanup, so room is available
+    #     Note 1: decompression causes a temporary memory spike → if available RAM < 1GB skip (prevent OOM)
+    #     Note 2: after Disable succeeds if Enable fails the system compression feature stays permanently disabled → try/finally required
     Write-Host -NoNewline " · Memory Compression Store flush ..."
     try {
         $mm = Get-MMAgent -ErrorAction Stop
-        if ($mm.MemoryCompression) {
-            Disable-MMAgent -MemoryCompression -ErrorAction Stop
-            Start-Sleep -Milliseconds 800
-            Enable-MMAgent -MemoryCompression -ErrorAction Stop
-            Write-Host " [OK] (compressed pages released)" -ForegroundColor Green
-        } else {
+        if (-not $mm.MemoryCompression) {
             Write-Host " [skip] already disabled" -ForegroundColor DarkGray
+        } else {
+            # safety guard: decompression spike risk if available memory is below 1GB
+            $os = Get-CimInstance Win32_OperatingSystem
+            $availMB = [math]::Round($os.FreePhysicalMemory / 1024)
+            if ($availMB -lt 1024) {
+                Write-Host (" [skip] insufficient available RAM ({0} MB < 1024 MB) — decompression spike risk" -f $availMB) -ForegroundColor Yellow
+            } else {
+                $disabled = $false
+                try {
+                    Disable-MMAgent -MemoryCompression -ErrorAction Stop
+                    $disabled = $true
+                    # Wait for Decompress background work — GB store may be brief but 1500ms is a reasonable balance
+                    Start-Sleep -Milliseconds 1500
+                } finally {
+                    # CRITICAL: after Disable always guarantee Enable (system protection)
+                    if ($disabled) {
+                        try {
+                            Enable-MMAgent -MemoryCompression -ErrorAction Stop
+                            Write-Host " [OK] (compressed pages released)" -ForegroundColor Green
+                        } catch {
+                            # double failure — strongly alert user
+                            Write-Host ""
+                            Write-Host " [CRITICAL] MemoryCompression Re-Enable failed!" -ForegroundColor Red
+                            Write-Host "   Manual recovery required: run 'Enable-MMAgent -MemoryCompression' in PowerShell with administrator privileges" -ForegroundColor Red
+                            Write-Host "   Or reboot PC for automatic recovery" -ForegroundColor Yellow
+                        }
+                    }
+                }
+            }
         }
     } catch {
         Write-Host " [!] failed: $($_.Exception.Message)" -ForegroundColor Yellow
     }
 
     # A2. System-wide Working Set empty (NT level bulk)
-    #     Includes system processes separately from the 6-1 per-process loop.
+    #     the 6-1 per-process loop(PROCESS_SET_QUOTA permission missing causes protected process skip)
+    #     Supplemented in kernel mode. Same behavior as RAMMap "Empty Working Sets".
     Write-Host -NoNewline " · System Working Set empty (NT) ..."
     $rcWs = [MemoryAPI]::InvokeMemoryListCommand([MemoryAPI]::MemoryEmptyWorkingSets)
     if ($rcWs -eq 0) {
@@ -665,17 +694,38 @@ function Invoke-ShellRestart {
     }
 
     # B1. Explorer.exe restart
+    #     Note 1: systems with many shell extensions may take 5 seconds+ to restart → poll up to 15 seconds
+    #     Note 2: in administrator PS Start-Process starts explorer in elevated context
+    #             regular apps(drag and drop, IME etc) may lack permission.
+    #             Therefore rely only on Windows automatic shell restart(winlogon starts with user token).
+    #             On automatic restart failure do not start manually and only show user guidance.
     Write-Host -NoNewline " · Explorer restart ..."
     try {
         $explorers = Get-Process -Name explorer -ErrorAction SilentlyContinue
         $beforeMB = if ($explorers) { [math]::Round((($explorers | Measure-Object WorkingSet64 -Sum).Sum / 1MB), 1) } else { 0 }
-        $explorers | Stop-Process -Force -ErrorAction Stop
-        Start-Sleep -Milliseconds 1500
-        # Windows does not automatically restart explorer in some cases, so start it manually
-        if (-not (Get-Process -Name explorer -ErrorAction SilentlyContinue)) {
-            Start-Process -FilePath explorer.exe
+        if ($explorers) {
+            $explorers | Stop-Process -Force -ErrorAction Stop
         }
-        Write-Host (" [OK] (previous usage {0} MB)" -f $beforeMB) -ForegroundColor Green
+
+        # Windows automatic shell restart polling (wait up to 15 seconds)
+        $restartedByWindows = $false
+        for ($i = 0; $i -lt 30; $i++) {
+            Start-Sleep -Milliseconds 500
+            if (Get-Process -Name explorer -ErrorAction SilentlyContinue) {
+                $restartedByWindows = $true
+                break
+            }
+        }
+
+        if ($restartedByWindows) {
+            Write-Host (" [OK] Windows automatic restart complete (previous usage {0} MB)" -f $beforeMB) -ForegroundColor Green
+        } else {
+            # intentionally not launching elevated explorer.exe directly (preventing permission context contamination).
+            # provide safe recovery instructions to user.
+            Write-Host (" [!] Windows could not automatically restart (previous usage {0} MB)" -f $beforeMB) -ForegroundColor Yellow
+            Write-Host "   → Ctrl+Shift+Esc → Task Manager → File → 'Run new task' → enter explorer (uncheck administrator)" -ForegroundColor DarkYellow
+            Write-Host "   → Or log out/log in" -ForegroundColor DarkYellow
+        }
     } catch {
         Write-Host " [!] $($_.Exception.Message)" -ForegroundColor Yellow
     }

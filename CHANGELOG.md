@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.1] — 2026-04-19
+
+Hardening patch — addresses safety issues found in Round 1 self-review and Round 2 independent agent review.
+
+### Fixed
+- **MMAgent re-enable guarantee** (`Invoke-DeepRecovery`): wrap `Disable-MMAgent` → `Enable-MMAgent` in `try/finally` so the system never ends up with Memory Compression permanently disabled on script crash. On dual failure, prints a `[CRITICAL]` recovery instruction instead of leaving the user with a degraded system.
+- **OOM safety guard for Memory Compression flush**: skips A1 when available RAM < 1024 MB. Decompressing the compression store can transiently spike memory; this prevents pushing a near-full system over the edge.
+- **Explorer restart elevation hazard**: previously, when the script ran elevated and Windows failed to auto-restart Explorer, the script launched `explorer.exe` itself — but that started Explorer with the elevated token, breaking drag-and-drop / IME / shell extensions for normal apps. Now: extends Windows auto-restart polling to 15s and, on failure, displays user-actionable recovery steps (Task Manager → New Task → uncheck admin) instead of starting Explorer in the wrong context.
+- **MMAgent decompression wait**: bumped from 800ms to 1500ms to better cover GB-scale compression stores.
+
+### Improved
+- `Show-MemoryDiagnostics` Memory Compression message: now distinguishes between "admin needed" and "Windows build hides it" cases.
+- `Invoke-DeepRecovery` comment on NT command 2 now explains *why* it complements the per-process loop (covers protected processes that PROCESS_SET_QUOTA cannot open).
+- `Test-Patterns.ps1` now includes smoke tests for v1.1 functions, parameters, and the v1.1.1 safety guards (try/finally, OOM guard, polling loop, elevation guard, decompression wait).
+
+### Notes
+- All changes are internal hardening; CLI surface (flags, launchers) is unchanged from 1.1.0.
+
 ## [1.1.0] — 2026-04-19
 
 Closing the gap with reboot — additional reclamation tiers for stale caches.
