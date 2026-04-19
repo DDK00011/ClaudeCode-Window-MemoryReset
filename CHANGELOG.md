@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] — 2026-04-19
+
+GUI + observability — system tray daemon, threshold notifications, recovery history.
+
+### Added — System tray daemon (`MemoryReset-Tray.ps1`)
+- Always-on PowerShell daemon with `NotifyIcon` in the Windows notification area.
+- Periodic memory polling (default 30s) with live tooltip updates ("Memory: 67% used (43/64 GB)").
+- **Threshold notification (default 90%)**: shows a Windows BalloonTip when memory usage hits the threshold. Does NOT auto-recover — user retains full control. Cooldown 10 minutes between alerts.
+- Right-click context menu: Basic recovery / Deep recovery / Maximum recovery (Deep+Shell) / Diagnostics / Dry run / Recovery history / Settings / Exit.
+- All recovery actions delegate to `MemoryReset.ps1` so UAC elevation flows through the same path.
+- Single-instance protection via global mutex (no duplicate trays).
+- Settings persisted to `tray-settings.json` (threshold, polling interval, cooldown).
+- **Tray daemon itself runs without admin** — only the recovery action triggers UAC.
+
+### Added — Auto-start
+- `Tray-AutoStart.ps1` toggles registration in the Windows user Startup folder. No admin needed.
+- `Tray-AutoStart-Register.bat` / `Tray-AutoStart-Unregister.bat` double-click helpers.
+
+### Added — CSV recovery history (`recovery-history.csv`)
+- Every recovery run appends a row: Timestamp, Mode (basic/deep/deep+shell), Before/After Free MB, Recovered MB, Before/After % Free, Processes Killed, Runtime Sec.
+- File created automatically on first run, in the same folder as the script.
+- Tray menu has "View recovery history (CSV)" — opens the file in the default CSV handler (Excel) or Notepad.
+
+### Added — Launchers
+- `Tray.bat` — starts the tray daemon hidden (no console window).
+
+### Notes
+- Tray icon uses `System.Drawing.SystemIcons::Information` (Windows built-in). Future v1.3 may add custom icon.
+- BalloonTip is Windows 7+ compatible; Windows 10+ shows it as a native Action Center toast.
+- Notification is **observation only** — per user requirement, no auto-reboot or auto-recovery (work loss risk too high).
+
 ## [1.1.2] — 2026-04-19
 
 ### Changed

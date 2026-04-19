@@ -749,9 +749,54 @@ function Invoke-ShellRestart {
 }
 
 # ════════════════════════════════════════════════════════════════════
+# 7-C. CSV recovery history logging
+# ════════════════════════════════════════════════════════════════════
+function Write-RecoveryLog {
+    param(
+        [string]$Mode,
+        [int]$BeforeFreeMB,
+        [int]$AfterFreeMB,
+        [double]$BeforePctFree,
+        [double]$AfterPctFree,
+        [int]$ProcessesKilled,
+        [double]$RuntimeSec
+    )
+
+    $logPath = Join-Path $PSScriptRoot 'recovery-history.csv'
+    $isNew   = -not (Test-Path $logPath)
+
+    $row = [PSCustomObject]@{
+        Timestamp        = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+        Mode             = $Mode
+        BeforeFreeMB     = $BeforeFreeMB
+        AfterFreeMB      = $AfterFreeMB
+        RecoveredMB      = $AfterFreeMB - $BeforeFreeMB
+        BeforePctFree    = $BeforePctFree
+        AfterPctFree     = $AfterPctFree
+        RecoveredPctP    = [math]::Round($AfterPctFree - $BeforePctFree, 2)
+        ProcessesKilled  = $ProcessesKilled
+        RuntimeSec       = [math]::Round($RuntimeSec, 1)
+    }
+
+    try {
+        if ($isNew) {
+            $row | Export-Csv -Path $logPath -NoTypeInformation -Encoding UTF8
+        } else {
+            $row | Export-Csv -Path $logPath -NoTypeInformation -Encoding UTF8 -Append
+        }
+    } catch {
+        # Logging failures do not affect recovery itself — warn quietly only
+        Write-Host " [!] Failed to write CSV log: $($_.Exception.Message)" -ForegroundColor DarkYellow
+    }
+}
+
+# ════════════════════════════════════════════════════════════════════
 # 8. Main
 # ════════════════════════════════════════════════════════════════════
 try { $Host.UI.RawUI.WindowTitle = 'Memory Reset — Claude Code & Antigravity' } catch {}
+
+# Start runtime measurement
+$script:startTime = Get-Date
 
 Clear-Host
 Write-Host "╔══════════════════════════════════════════════════════════╗" -ForegroundColor Cyan
@@ -860,6 +905,21 @@ if (-not $DryRun) {
     Write-Host "╔══════════════════════════════════════════════════════════╗" -ForegroundColor Cyan
     Write-Host (" Recovered RAM: {0}{1:N0} MB   ({2}{3:N1}%p)" -f $sign, $recovered, $sign, $pctChange) -ForegroundColor Green
     Write-Host "╚══════════════════════════════════════════════════════════╝" -ForegroundColor Cyan
+
+    # CSV recovery history record (v1.2+)
+    $modeTag = if ($Deep -and $IncludeShell) { 'deep+shell' }
+               elseif ($Deep)                { 'deep' }
+               else                          { 'basic' }
+    $elapsed = ((Get-Date) - $script:startTime).TotalSeconds
+    Write-RecoveryLog `
+        -Mode             $modeTag `
+        -BeforeFreeMB     $before.FreeMB `
+        -AfterFreeMB      $after.FreeMB `
+        -BeforePctFree    $before.PctFree `
+        -AfterPctFree     $after.PctFree `
+        -ProcessesKilled  $targets.Count `
+        -RuntimeSec       $elapsed
+    Write-Host (" [i] Recovery history recorded: recovery-history.csv (run {0:N1} seconds)" -f $elapsed) -ForegroundColor DarkGray
 }
 
 if (-not $KeepAlive) {

@@ -60,8 +60,14 @@ Run.bat
 :: 3. Deep recovery [v1.1+] — Memory Compression flush + System WS + network cache
 Run-Deep.bat
 
-:: Diagnostics only [v1.1+] (no UAC required) — view memory distribution/top memory-consuming processes
+:: Diagnostics only [v1.1+] — view memory distribution/top memory-consuming processes
 Run-Diagnose.bat
+
+:: Start system tray daemon [v1.2+] — stay in system tray, alert at 90%
+Tray.bat
+
+:: Register system tray auto-start at Windows boot (no UAC required)
+Tray-AutoStart-Register.bat
 ```
 
 Or directly in PowerShell:
@@ -142,13 +148,44 @@ Or directly in PowerShell:
 | Garbled non-ASCII characters | Switch the console font to a Unicode font such as `Consolas` / `Cascadia Mono` |
 | Script does not launch | File is blocked — right-click file → Properties → check "Unblock" |
 
+## System tray daemon [v1.2+]
+
+```cmd
+Tray.bat                          :: Start system tray (hidden window)
+Tray-AutoStart-Register.bat       :: Register auto-start at boot
+Tray-AutoStart-Unregister.bat     :: Unregister auto-start
+```
+
+- **Always resident**: Memory usage icon in the notification area beside the clock
+- **Threshold alert**: BalloonTip when memory usage reaches the threshold (default 90%) — **does not auto recover** (guarantees user choice, prevents work loss)
+- **Right-click menu**: basic/deep/maximum recovery / diagnostics / dry run / recovery history / threshold settings / exit
+- **Single instance**: Prevent duplicate runs with mutex
+- **Save settings**: `tray-settings.json` (threshold/polling interval/cooldown)
+- **Daemon itself needs no administrator privileges** — auto-elevates via UAC when recovery triggers
+
+## Recovery history (CSV) [v1.2+]
+
+Automatically recorded in `recovery-history.csv` on every recovery run:
+
+| Column | Meaning |
+|------|------|
+| Timestamp | yyyy-MM-dd HH:mm:ss |
+| Mode | basic / deep / deep+shell |
+| BeforeFreeMB / AfterFreeMB | Available MB before/after recovery |
+| RecoveredMB | Recovery amount (may be negative — when other apps are holding memory) |
+| BeforePctFree / AfterPctFree | Available % before/after recovery |
+| ProcessesKilled | Number of terminated Claude/Antigravity processes |
+| RuntimeSec | Execution duration |
+
+Open from the system tray menu → "View recovery history" in Excel/Notepad. You can make a data-based decision on which mode is most effective on your system.
+
 ## Future improvements (Roadmap)
 
-- [ ] System tray GUI (C# WPF, NotifyIcon) — automatic available RAM threshold trigger
-- [ ] recovery history CSV logging + trend chart
+- [ ] Custom system tray icon design (currently Windows default icon)
+- [ ] Recovery history trend chart (PowerShell + Chart.js)
 - [ ] Option to preserve only specific sessions with a PID/title whitelist
-- [ ] Task Scheduler integration (for example: auto-run every 30 minutes)
 - [ ] Message localization (i18n)
+- [ ] CI: PSScriptAnalyzer + automatic PARSE verification
 
 ## Contribution / security reports
 
