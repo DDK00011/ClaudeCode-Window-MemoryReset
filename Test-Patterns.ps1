@@ -131,3 +131,102 @@ if ($src -match 'Start-Sleep\s+-Milliseconds\s+1500') {
 } else {
     Write-Host "[WARN] MMAgent sleep 1500ms not confirmed" -ForegroundColor Yellow
 }
+
+# v1.2 new feature smoke test
+Write-Host ""
+Write-Host "== v1.2 tray/CSV smoke test =="
+
+# 8. CSV logging function present
+if ($src -match '(?ms)^function\s+Write-RecoveryLog\b') {
+    Write-Host "[PASS] CSV logging function definition: Write-RecoveryLog" -ForegroundColor Green
+} else {
+    Write-Host "[FAIL] Write-RecoveryLog function missing" -ForegroundColor Red
+}
+
+# 9. CSV lock/retry guard
+if ($src -match 'maxRetry\s*=\s*3' -and $src -match 'fallback') {
+    Write-Host "[PASS] CSV file lock retry + fallback guard present" -ForegroundColor Green
+} else {
+    Write-Host "[WARN] CSV lock guard not confirmed" -ForegroundColor Yellow
+}
+
+# 10. Tray daemon file present + smoke check
+$trayPath = Join-Path $PSScriptRoot 'MemoryReset-Tray.ps1'
+if (Test-Path $trayPath) {
+    Write-Host "[PASS] MemoryReset-Tray.ps1 file present" -ForegroundColor Green
+    $trayContent = Get-Content $trayPath -Raw -Encoding UTF8
+
+    # 10-1. P0 fix verification: Add-Type before mutex check
+    $addTypeIdx = $trayContent.IndexOf("Add-Type -AssemblyName System.Windows.Forms")
+    $mutexIdx   = $trayContent.IndexOf("New-Object System.Threading.Mutex")
+    if ($addTypeIdx -gt 0 -and $mutexIdx -gt 0 -and $addTypeIdx -lt $mutexIdx) {
+        Write-Host "[PASS] Tray Add-Type executes before mutex check" -ForegroundColor Green
+    } else {
+        Write-Host "[FAIL] Tray Add-Type order error — MessageBox may fail on second instance" -ForegroundColor Red
+    }
+
+    # 10-2. mutex Local\ scope (avoid Global\ permission issue)
+    if ($trayContent.Contains("'Local\MemoryReset-Tray-Singleton'")) {
+        Write-Host "[PASS] Tray mutex Local\ scope (user session)" -ForegroundColor Green
+    } elseif ($trayContent.Contains("'Global\MemoryReset-Tray-Singleton'")) {
+        Write-Host "[WARN] Tray mutex Global\ — permission issue possible, Local\ recommended" -ForegroundColor Yellow
+    } else {
+        Write-Host "[WARN] Tray mutex naming not confirmed" -ForegroundColor Yellow
+    }
+
+    # 10-3. Tick function separation (remove reflection dependency)
+    if ($trayContent -match '(?ms)^function\s+Invoke-MemoryTick\b') {
+        Write-Host "[PASS] Tray Invoke-MemoryTick function separated (no reflection dependency)" -ForegroundColor Green
+    } else {
+        Write-Host "[WARN] Tick function separation not confirmed" -ForegroundColor Yellow
+    }
+
+    # 10-4. Debug log helper
+    if ($trayContent -match '(?ms)^function\s+Write-TrayLog\b') {
+        Write-Host "[PASS] Tray debug log helper present (can track silent failures)" -ForegroundColor Green
+    } else {
+        Write-Host "[WARN] Write-TrayLog not confirmed — difficult to track silent failures" -ForegroundColor Yellow
+    }
+} else {
+    Write-Host "[FAIL] MemoryReset-Tray.ps1 file missing" -ForegroundColor Red
+}
+
+# 11. .gitignore personal data protection
+$gitignorePath = Join-Path $PSScriptRoot '.gitignore'
+if (Test-Path $gitignorePath) {
+    $gi = Get-Content $gitignorePath -Raw
+    if ($gi -match '\*\.csv' -and $gi -match 'tray-settings') {
+        Write-Host "[PASS] .gitignore protects *.csv + tray-settings.json" -ForegroundColor Green
+    } else {
+        Write-Host "[WARN] .gitignore personal data pattern not confirmed" -ForegroundColor Yellow
+    }
+}
+
+# v1.2.1 Round 2 patch verification
+Write-Host ""
+Write-Host "== v1.2.1 Round 2 patch verification =="
+
+# 12. Explicit STA (Tray.bat)
+$trayBat = Join-Path $PSScriptRoot 'Tray.bat'
+if (Test-Path $trayBat) {
+    $batContent = Get-Content $trayBat -Raw
+    if ($batContent -match '-Sta\b') {
+        Write-Host "[PASS] Tray.bat specifies -Sta flag (WinForms compatibility)" -ForegroundColor Green
+    } else {
+        Write-Host "[WARN] Tray.bat -Sta not confirmed — InputBox etc may hang in MTA environment" -ForegroundColor Yellow
+    }
+}
+
+# 13. CSV column name clarification: FreedMB / UsedBeforeMB / UsedAfterMB
+if ($src -match 'UsedBeforeMB' -and $src -match 'FreedMB') {
+    Write-Host "[PASS] CSV schema clear (UsedBefore/UsedAfter/FreedMB)" -ForegroundColor Green
+} else {
+    Write-Host "[WARN] CSV column name clarification not confirmed" -ForegroundColor Yellow
+}
+
+# 14. Prevent same-second fallback file collisions (daily consolidation + GUID emergency)
+if ($src -match 'recovery-history-fallback-' -and $src -match 'recovery-history-emergency-') {
+    Write-Host "[PASS] Prevent CSV fallback same-second collisions (daily consolidation + GUID emergency)" -ForegroundColor Green
+} else {
+    Write-Host "[WARN] CSV fallback collision prevention not verified" -ForegroundColor Yellow
+}

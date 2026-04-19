@@ -754,6 +754,7 @@ function Invoke-ShellRestart {
 function Write-RecoveryLog {
     param(
         [string]$Mode,
+        [int]$TotalMB,
         [int]$BeforeFreeMB,
         [int]$AfterFreeMB,
         [double]$BeforePctFree,
@@ -765,28 +766,78 @@ function Write-RecoveryLog {
     $logPath = Join-Path $PSScriptRoot 'recovery-history.csv'
     $isNew   = -not (Test-Path $logPath)
 
+    # clarify column meanings:
+    #   Used* = used memory (memory usage)
+    #   Free* = available memory (increases after recovery)
+    #   FreedMB = amount recovered = UsedBefore - UsedAfter (= AfterFree - BeforeFree, positive means recovery succeeded)
+    $usedBefore = $TotalMB - $BeforeFreeMB
+    $usedAfter  = $TotalMB - $AfterFreeMB
+
     $row = [PSCustomObject]@{
         Timestamp        = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
         Mode             = $Mode
+        TotalMB          = $TotalMB
+        UsedBeforeMB     = $usedBefore
+        UsedAfterMB      = $usedAfter
+        FreedMB          = $usedBefore - $usedAfter      # positive = recovery succeeded
         BeforeFreeMB     = $BeforeFreeMB
         AfterFreeMB      = $AfterFreeMB
-        RecoveredMB      = $AfterFreeMB - $BeforeFreeMB
         BeforePctFree    = $BeforePctFree
         AfterPctFree     = $AfterPctFree
-        RecoveredPctP    = [math]::Round($AfterPctFree - $BeforePctFree, 2)
+        FreedPctP        = [math]::Round($AfterPctFree - $BeforePctFree, 2)  # available % increase (+ means recovery)
         ProcessesKilled  = $ProcessesKilled
         RuntimeSec       = [math]::Round($RuntimeSec, 1)
     }
 
-    try {
-        if ($isNew) {
-            $row | Export-Csv -Path $logPath -NoTypeInformation -Encoding UTF8
-        } else {
-            $row | Export-Csv -Path $logPath -NoTypeInformation -Encoding UTF8 -Append
+    # CSV file lock (when open in Excel, etc.) handling — retry up to 3 times + fallback file
+    $maxRetry = 3
+    for ($attempt = 1; $attempt -le $maxRetry; $attempt++) {
+        try {
+            if ($isNew) {
+                $row | Export-Csv -Path $logPath -NoTypeInformation -Encoding UTF8 -ErrorAction Stop
+            } else {
+                $row | Export-Csv -Path $logPath -NoTypeInformation -Encoding UTF8 -Append -ErrorAction Stop
+            }
+            return  # success
+        } catch {
+            if ($attempt -lt $maxRetry) {
+                Start-Sleep -Milliseconds (300 * $attempt)  # progressive backoff
+            } else {
+                # final failure — append to date-based fallback file (prevent same-second collisions)
+                # Filename: recovery-history-fallback-YYYYMMDD.csv  → all same-day fallback entries accumulate in one file
+                Write-Host " [!] CSV log write failed (lock or permission): $($_.Exception.Message)" -ForegroundColor DarkYellow
+                $fallbackName = 'recovery-history-fallback-' + (Get-Date -Format 'yyyyMMdd') + '.csv'
+                $fallback = Join-Path (Split-Path $logPath -Parent) $fallbackName
+                $fallbackIsNew = -not (Test-Path $fallback)
+                # fallback can also be locked — brief retry
+                $fbOk = $false
+                for ($fbAttempt = 1; $fbAttempt -le 3; $fbAttempt++) {
+                    try {
+                        if ($fallbackIsNew) {
+                            $row | Export-Csv -Path $fallback -NoTypeInformation -Encoding UTF8 -ErrorAction Stop
+                        } else {
+                            $row | Export-Csv -Path $fallback -NoTypeInformation -Encoding UTF8 -Append -ErrorAction Stop
+                        }
+                        $fbOk = $true
+                        break
+                    } catch {
+                        Start-Sleep -Milliseconds (200 * $fbAttempt)
+                    }
+                }
+                if ($fbOk) {
+                    Write-Host (" [i] Written to fallback file: {0}" -f (Split-Path $fallback -Leaf)) -ForegroundColor DarkGray
+                } else {
+                    # last resort: unique GUID filename (avoid collisions entirely, combine during reconstruction)
+                    $unique = Join-Path (Split-Path $logPath -Parent) ('recovery-history-emergency-' + (Get-Date -Format 'yyyyMMdd-HHmmss-fff') + '-' + ([Guid]::NewGuid().ToString('N').Substring(0,4)) + '.csv')
+                    try {
+                        $row | Export-Csv -Path $unique -NoTypeInformation -Encoding UTF8 -ErrorAction Stop
+                        Write-Host (" [i] Written to emergency file: {0}" -f (Split-Path $unique -Leaf)) -ForegroundColor DarkGray
+                    } catch {
+                        Write-Host " [!] All write attempts failed (CSV log missing)" -ForegroundColor DarkYellow
+                    }
+                }
+            }
         }
-    } catch {
-        # Logging failures do not affect recovery itself — warn quietly only
-        Write-Host " [!] Failed to write CSV log: $($_.Exception.Message)" -ForegroundColor DarkYellow
     }
 }
 
@@ -913,6 +964,7 @@ if (-not $DryRun) {
     $elapsed = ((Get-Date) - $script:startTime).TotalSeconds
     Write-RecoveryLog `
         -Mode             $modeTag `
+        -TotalMB          $before.TotalMB `
         -BeforeFreeMB     $before.FreeMB `
         -AfterFreeMB      $after.FreeMB `
         -BeforePctFree    $before.PctFree `

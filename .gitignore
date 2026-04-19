@@ -1,14 +1,23 @@
-# Logs
-*.log
+﻿# ── Personal data / runtime state (never commit) ──
+*.csv                      # recovery history (all CSV files including recovery-history.csv)
+tray-settings.json         # user threshold/polling settings
+tray-state.json            # runtime state such as last alert time
+recovery-history.*         # all backup/rollover variants
+*.log                      # all logs including system tray daemon debug logs
+
+# Backups
 *.txt.bak
-recovery-history.csv
+*.json.bak
 
 # Local config / secrets
 .env
 .env.local
+.env.*
 secrets/
 *.pfx
 *.key
+*.pem
+credentials*
 
 # Windows artifacts
 Thumbs.db

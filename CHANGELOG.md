@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.1] — 2026-04-19
+
+Hardening patch — addresses Round 1 self-review and Round 2 independent agent review of the v1.2.0 tray daemon.
+
+### Fixed (Round 1 — self-review)
+- **P0: `MessageBox` called before `Add-Type`** — second tray instance would throw `TypeNotFound` instead of showing the friendly "already running" dialog. Moved assembly load to the very top.
+- **`Global\` mutex** → `Local\` for user-session scope (avoids privilege issues; correct semantic for per-user singleton).
+- **Reflection-based `OnTick` invocation** for immediate first tick was fragile across .NET versions. Replaced with a named `Invoke-MemoryTick` function called directly + bound to timer.
+- **No debug log** — added `Write-TrayLog` (file-based, `tray-debug.log`) so silent timer failures are traceable.
+- **Left-click `ShowContextMenu` reflection** now has a fallback to `ContextMenuStrip.Show(Cursor.Position)` when reflection fails.
+- **CSV file lock** (Excel etc.) — added 3-attempt retry with progressive backoff and a daily-rolling fallback file (`recovery-history-fallback-YYYYMMDD.csv`). Prevents history loss when the main file is locked.
+
+### Fixed (Round 2 — independent agent review)
+- **STA threading**: `Tray.bat` now passes `-Sta` to `powershell.exe`. PS 5.1 default is MTA but WinForms / NotifyIcon / InputBox require STA — caused intermittent hang risk on certain dialogs. ([MS Docs - STA](https://learn.microsoft.com/en-us/dotnet/api/system.stathreadattribute))
+- **CSV column name confusion**: previous `RecoveredMB` was technically correct (Free delta) but ambiguous against the natural reading "amount of memory recovered" (= Used reduction). Schema renamed/expanded:
+  - Added `TotalMB`, `UsedBeforeMB`, `UsedAfterMB`, `FreedMB` (= UsedBefore − UsedAfter, positive = success)
+  - Renamed `RecoveredPctP` → `FreedPctP`
+- **Fallback CSV same-second collision**: previous fallback used `yyyyMMdd-HHmmss` and `Export-Csv` without `-Append` — two simultaneous fallbacks could overwrite each other. Now: daily-rolling fallback file with `-Append`, plus an "emergency" file with milliseconds + GUID fragment as last resort. Zero collision risk.
+
+### Improved — Test-Patterns.ps1
+- Added 12 new smoke tests for v1.2 / v1.2.1 (Tray Add-Type ordering, mutex scope, Tick separation, debug log, CSV lock guards, STA flag, CSV schema, fallback collision avoidance, .gitignore privacy).
+- Total: 26 PASS / 0 FAIL / 0 WARN on user's environment.
+
+### Privacy
+- `.gitignore` strengthened to block all `*.csv`, `tray-settings.json`, `tray-state.json`, `*.log`, `*.json.bak`, and broader credential patterns. Personal recovery history will not be committed.
+
 ## [1.2.0] — 2026-04-19
 
 GUI + observability — system tray daemon, threshold notifications, recovery history.

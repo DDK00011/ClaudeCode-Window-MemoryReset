@@ -23,10 +23,20 @@
 param()
 
 # ════════════════════════════════════════════════════════════════════
-# 1. Single-instance mutex
+# 1. Load assemblies early (before mutex check — make MessageBox available)
+# ════════════════════════════════════════════════════════════════════
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+Add-Type -AssemblyName Microsoft.VisualBasic   # InputBox
+[System.Windows.Forms.Application]::EnableVisualStyles()
+[System.Windows.Forms.Application]::SetCompatibleTextRenderingDefault($false)
+
+# ════════════════════════════════════════════════════════════════════
+# 2. Single instance mutex
+#    Local\ scope (user session) — Global\ may have permission issues
 # ════════════════════════════════════════════════════════════════════
 $createdNew = $false
-$mutex = New-Object System.Threading.Mutex($false, 'Global\MemoryReset-Tray-Singleton', [ref]$createdNew)
+$mutex = New-Object System.Threading.Mutex($false, 'Local\MemoryReset-Tray-Singleton', [ref]$createdNew)
 if (-not $createdNew) {
     [System.Windows.Forms.MessageBox]::Show(
         "Memory Reset Tray is already running.`nCheck the memory icon in the system tray (next to the clock).",
@@ -38,20 +48,25 @@ if (-not $createdNew) {
 }
 
 # ════════════════════════════════════════════════════════════════════
-# 2. Assembly load
-# ════════════════════════════════════════════════════════════════════
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
-[System.Windows.Forms.Application]::EnableVisualStyles()
-[System.Windows.Forms.Application]::SetCompatibleTextRenderingDefault($false)
-
-# ════════════════════════════════════════════════════════════════════
 # 3. Settings (tray-settings.json)
 # ════════════════════════════════════════════════════════════════════
-$script:scriptDir   = $PSScriptRoot
-$script:mainScript  = Join-Path $scriptDir 'MemoryReset.ps1'
+$script:scriptDir    = $PSScriptRoot
+$script:mainScript   = Join-Path $scriptDir 'MemoryReset.ps1'
 $script:settingsPath = Join-Path $scriptDir 'tray-settings.json'
 $script:historyPath  = Join-Path $scriptDir 'recovery-history.csv'
+$script:logPath      = Join-Path $scriptDir 'tray-debug.log'
+
+# Debug log helper (Tray daemon has hidden console, making silent failure hard to track — write to file)
+function Write-TrayLog {
+    param([string]$Message, [string]$Level = 'INFO')
+    try {
+        $line = "{0} [{1}] {2}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Level, $Message
+        Add-Content -Path $script:logPath -Value $line -Encoding UTF8 -ErrorAction SilentlyContinue
+    } catch {
+        # Ignore log failures (no runtime impact)
+    }
+}
+Write-TrayLog "Tray daemon started (PID=$PID)"
 
 $defaultSettings = @{
     AlertThresholdPct = 90    # Memory usage that triggers alert
@@ -216,56 +231,71 @@ $icon.ContextMenuStrip = $menu
 # Show quick recovery menu on left click (can change to DoubleClick)
 $icon.Add_MouseClick({
     if ($_.Button -eq [System.Windows.Forms.MouseButtons]::Left) {
-        # Workaround because NotifyIcon ShowContextMenu is private
-        $methodInfo = [System.Windows.Forms.NotifyIcon].GetMethod(
-            'ShowContextMenu',
-            [System.Reflection.BindingFlags]'Instance, NonPublic'
-        )
-        if ($methodInfo) { $methodInfo.Invoke($icon, $null) }
+        # NotifyIcon ShowContextMenu is a private method — reflection workaround (verified on PS 5.1+)
+        try {
+            $methodInfo = [System.Windows.Forms.NotifyIcon].GetMethod(
+                'ShowContextMenu',
+                [System.Reflection.BindingFlags]'Instance, NonPublic'
+            )
+            if ($methodInfo) {
+                $methodInfo.Invoke($icon, $null)
+            } else {
+                # fallback on reflection failure: show menu directly (cursor position)
+                $icon.ContextMenuStrip.Show([System.Windows.Forms.Cursor]::Position)
+            }
+        } catch {
+            Write-TrayLog "Failed to show left click menu: $($_.Exception.Message)" 'WARN'
+            try { $icon.ContextMenuStrip.Show([System.Windows.Forms.Cursor]::Position) } catch {}
+        }
     }
 })
-
-# Microsoft.VisualBasic.Interaction (InputBox) assembly
-Add-Type -AssemblyName Microsoft.VisualBasic
 
 # ════════════════════════════════════════════════════════════════════
 # 6. Polling timer — memory check + threshold alert
 # ════════════════════════════════════════════════════════════════════
 $script:lastAlert = $null
 
+# Extract Tick logic into a named function — immediate call + timer use the same code (remove reflection dependency)
+function Invoke-MemoryTick {
+    try {
+        $m = Get-MemoryUsage
+        if ($null -eq $m) {
+            Write-TrayLog "Get-MemoryUsage returned null (CIM access failed?)" 'WARN'
+            return
+        }
+
+        # Update tooltip (NotifyIcon.Text has a maximum of 63 characters — Windows API limit)
+        $tooltip = "Memory: {0}% used ({1}/{2} GB)" -f $m.UsedPct, [math]::Round($m.UsedMB/1024,1), [math]::Round($m.TotalMB/1024,1)
+        if ($tooltip.Length -gt 63) { $tooltip = $tooltip.Substring(0, 63) }
+        $icon.Text = $tooltip
+
+        # Update menu header
+        $mnuStatus.Text = (" Used {0}% / Available {1:N0} MB" -f $m.UsedPct, $m.FreeMB)
+
+        # Threshold alert (apply cooldown)
+        if ($m.UsedPct -ge $script:settings.AlertThresholdPct) {
+            $now = Get-Date
+            $shouldAlert = ($null -eq $script:lastAlert) -or
+                           (($now - $script:lastAlert).TotalMinutes -ge $script:settings.AlertCooldownMin)
+            if ($shouldAlert) {
+                $msg = "Memory usage reached {0}%.`nRight click the system tray icon → 'Deep recovery (Deep)' is recommended." -f $m.UsedPct
+                $icon.ShowBalloonTip(8000, "Memory threshold alert", $msg, [System.Windows.Forms.ToolTipIcon]::Warning)
+                $script:lastAlert = $now
+                Write-TrayLog ("Threshold alert triggered: {0}% (threshold {1}%)" -f $m.UsedPct, $script:settings.AlertThresholdPct)
+            }
+        }
+    } catch {
+        Write-TrayLog "Tick handling failed: $($_.Exception.Message)" 'ERROR'
+    }
+}
+
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = $script:settings.CheckIntervalSec * 1000
-$timer.Add_Tick({
-    $m = Get-MemoryUsage
-    if ($null -eq $m) { return }
-
-    # Update tooltip (NotifyIcon.Text has a maximum of 63 characters — Windows API limit)
-    $tooltip = "Memory: {0}% used ({1}/{2} GB)" -f $m.UsedPct, [math]::Round($m.UsedMB/1024,1), [math]::Round($m.TotalMB/1024,1)
-    if ($tooltip.Length -gt 63) { $tooltip = $tooltip.Substring(0, 63) }
-    $icon.Text = $tooltip
-
-    # Update menu header
-    $mnuStatus.Text = (" Used {0}% / Available {1:N0} MB" -f $m.UsedPct, $m.FreeMB)
-
-    # Threshold alert (apply cooldown)
-    if ($m.UsedPct -ge $script:settings.AlertThresholdPct) {
-        $now = Get-Date
-        $shouldAlert = ($null -eq $script:lastAlert) -or
-                       (($now - $script:lastAlert).TotalMinutes -ge $script:settings.AlertCooldownMin)
-        if ($shouldAlert) {
-            $msg = "Memory usage reached {0}%.`nRight click the system tray icon → 'Deep recovery (Deep)' is recommended." -f $m.UsedPct
-            $icon.ShowBalloonTip(8000, "Memory threshold alert", $msg, [System.Windows.Forms.ToolTipIcon]::Warning)
-            $script:lastAlert = $now
-        }
-    }
-})
+$timer.Add_Tick({ Invoke-MemoryTick })
 $timer.Start()
 
-# Measure 1 time immediately (first display without waiting)
-$timer_TickInvoke = $timer.GetType().GetMethod('OnTick', [System.Reflection.BindingFlags]'Instance, NonPublic')
-if ($timer_TickInvoke) {
-    try { $timer_TickInvoke.Invoke($timer, @([System.EventArgs]::Empty)) } catch {}
-}
+# Measure 1 time immediately (so the user does not wait 30 seconds)
+Invoke-MemoryTick
 
 # ════════════════════════════════════════════════════════════════════
 # 7. Startup alert + message loop
@@ -276,11 +306,19 @@ $icon.ShowBalloonTip(3000,
     [System.Windows.Forms.ToolTipIcon]::Info)
 
 try {
+    Write-TrayLog "Entering message loop"
     [System.Windows.Forms.Application]::Run()
+} catch {
+    Write-TrayLog "Message loop exception: $($_.Exception.Message)" 'ERROR'
 } finally {
-    $timer.Stop()
-    $timer.Dispose()
-    if ($icon.Visible) { $icon.Visible = $false }
-    $icon.Dispose()
-    if ($mutex) { $mutex.ReleaseMutex(); $mutex.Dispose() }
+    Write-TrayLog "Tray daemon terminated (starting cleanup)"
+    try { $timer.Stop()    } catch {}
+    try { $timer.Dispose() } catch {}
+    if ($icon -and $icon.Visible) { $icon.Visible = $false }
+    try { $icon.Dispose()  } catch {}
+    if ($mutex) {
+        try { $mutex.ReleaseMutex() } catch {}
+        try { $mutex.Dispose()      } catch {}
+    }
+    Write-TrayLog "Tray daemon cleanup complete"
 }
