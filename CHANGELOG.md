@@ -1,4 +1,4 @@
-# Changelog
+﻿# Changelog
 
 All notable changes to this project will be documented in this file.
 
@@ -23,6 +23,6 @@ Initial public release.
 - README with reproducible reclamation result.
 
 ### Validated
-- Real-world: 93% memory usage → 31% on Windows 10 LTSC 2021, 64 GB RAM, 101 target processes (~40 GB reclaimed).
+- Real-world: 95% memory usage → 31% on Windows 10 LTSC 2021 (build 19044, 21H2) with DDR4 64 GB RAM, 101 target processes (~40 GB reclaimed). Run time ~15 seconds.
 - Claude Desktop preservation: 9/9 PIDs preserved across all measured runs.
 - API correctness verified against Process Hacker / System Informer phnt headers, MSDN, and Geoff Chappell's ntoskrnl reference.
