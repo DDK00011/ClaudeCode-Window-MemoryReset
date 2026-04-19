@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.2] — 2026-04-19
+
+### Changed
+- **UAC always required** (per user request): `-DryRun` and `-Diagnose` no longer skip UAC elevation. Rationale:
+  - `-Diagnose` can now enumerate the "Memory Compression" minimal process and inspect protected processes
+  - `-DryRun` measures protected process memory accurately
+  - Consistent UAC visibility on every run (security awareness)
+- The auto-elevation block now forwards `-DryRun` and `-Diagnose` flags as well.
+
 ## [1.1.1] — 2026-04-19
 
 Hardening patch — addresses safety issues found in Round 1 self-review and Round 2 independent agent review.

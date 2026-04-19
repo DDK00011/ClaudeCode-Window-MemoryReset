@@ -48,7 +48,8 @@
     .\MemoryReset.ps1 -SkipConfirmation -KeepAlive        # automation
 
 .NOTES
-    Administrator privileges required (-DryRun / -Diagnose excluded). Attempt automatic elevation if unavailable.
+    Administrator privileges always required (all modes). Automatically attempts UAC elevation if unavailable.
+    [v1.1.2 change] Force UAC also for DryRun / Diagnose — accurate measurement of protected processes + security visibility.
 #>
 
 [CmdletBinding()]
@@ -77,27 +78,29 @@ function Test-IsAdmin {
 }
 
 if (-not (Test-IsAdmin)) {
-    if ($DryRun -or $Diagnose) {
-        # DryRun / Diagnose are read-only → no administrator privileges needed, proceed as is
-        Write-Host "[i] Read-only mode: proceed without administrator privileges" -ForegroundColor DarkGray
-    } else {
-        Write-Host "[!] Administrator privileges required. Attempting UAC elevation..." -ForegroundColor Yellow
-        $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`"")
-        if ($SkipConfirmation)  { $argList += '-SkipConfirmation' }
-        if ($KeepAlive)         { $argList += '-KeepAlive' }
-        if ($Deep)              { $argList += '-Deep' }
-        if ($IncludeShell)      { $argList += '-IncludeShell' }
-        if ($PSBoundParameters.ContainsKey('GracefulTimeoutSec')) {
-            $argList += @('-GracefulTimeoutSec', $GracefulTimeoutSec)
-        }
-        try {
-            Start-Process powershell.exe -Verb RunAs -ArgumentList $argList -ErrorAction Stop
-        } catch {
-            Write-Host "[X] Elevation failed: $_" -ForegroundColor Red
-            exit 1
-        }
-        exit 0
+    # v1.1.2: Force UAC always per user request (DryRun / Diagnose also use administrator privileges)
+    # Reason:
+    #   - Diagnose can enumerate "Memory Compression" processes / view other user processes
+    #   - DryRun can accurately measure memory of protected processes
+    #   - User confirms UAC each run (security visibility)
+    Write-Host "[!] Administrator privileges required. Attempting UAC elevation..." -ForegroundColor Yellow
+    $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`"")
+    if ($DryRun)            { $argList += '-DryRun' }
+    if ($SkipConfirmation)  { $argList += '-SkipConfirmation' }
+    if ($KeepAlive)         { $argList += '-KeepAlive' }
+    if ($Deep)              { $argList += '-Deep' }
+    if ($IncludeShell)      { $argList += '-IncludeShell' }
+    if ($Diagnose)          { $argList += '-Diagnose' }
+    if ($PSBoundParameters.ContainsKey('GracefulTimeoutSec')) {
+        $argList += @('-GracefulTimeoutSec', $GracefulTimeoutSec)
     }
+    try {
+        Start-Process powershell.exe -Verb RunAs -ArgumentList $argList -ErrorAction Stop
+    } catch {
+        Write-Host "[X] Elevation failed: $_" -ForegroundColor Red
+        exit 1
+    }
+    exit 0
 }
 
 # IncludeShell is meaningless without Deep — auto-enable
