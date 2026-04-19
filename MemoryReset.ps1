@@ -27,13 +27,28 @@
 .PARAMETER KeepAlive
     Exit immediately after completion without waiting for key input.
 
+.PARAMETER Deep
+    [v1.1+] Tier A additional recovery — Memory Compression Store flush + System Working Set empty + network cache cleanup.
+    Safe additional steps to narrow the gap with reboot.
+
+.PARAMETER IncludeShell
+    [v1.1+] Tier B additional — Explorer.exe + Windows Search service restart.
+    Desktop flickers for 1~2 seconds and open Explorer windows close. Use with -Deep.
+
+.PARAMETER Diagnose
+    [v1.1+] Run diagnostics only without recovery — show memory list distribution, compression store, top consuming processes.
+    No UAC required.
+
 .EXAMPLE
-    .\MemoryReset.ps1
-    .\MemoryReset.ps1 -DryRun
-    .\MemoryReset.ps1 -SkipConfirmation -KeepAlive
+    .\MemoryReset.ps1                                     # default recovery
+    .\MemoryReset.ps1 -DryRun                             # precheck
+    .\MemoryReset.ps1 -Diagnose                           # Memory analysis only
+    .\MemoryReset.ps1 -Deep                               # Tier A addition
+    .\MemoryReset.ps1 -Deep -IncludeShell                 # Tier A + B
+    .\MemoryReset.ps1 -SkipConfirmation -KeepAlive        # automation
 
 .NOTES
-    Administrator privileges required. Attempt automatic elevation if unavailable.
+    Administrator privileges required (-DryRun / -Diagnose excluded). Attempt automatic elevation if unavailable.
 #>
 
 [CmdletBinding()]
@@ -41,7 +56,12 @@ param(
     [int]$GracefulTimeoutSec = 8,
     [switch]$DryRun,
     [switch]$SkipConfirmation,
-    [switch]$KeepAlive
+    [switch]$KeepAlive,
+
+    # v1.1 added ─────────────────────────────────────────────
+    [switch]$Deep,           # Tier A: Memory Compression flush + System WS empty + network cache
+    [switch]$IncludeShell,   # Tier B: Explorer.exe + Windows Search restart (use with Deep)
+    [switch]$Diagnose        # Show detailed memory distribution before recovery
 )
 
 $ErrorActionPreference = 'Continue'
@@ -57,14 +77,16 @@ function Test-IsAdmin {
 }
 
 if (-not (Test-IsAdmin)) {
-    if ($DryRun) {
-        # DryRun has no destructive operation → administrator privileges not required, continue.
-        Write-Host "[i] DryRun mode: continue without administrator privileges (show targets only)" -ForegroundColor DarkGray
+    if ($DryRun -or $Diagnose) {
+        # DryRun / Diagnose are read-only → no administrator privileges needed, proceed as is
+        Write-Host "[i] Read-only mode: proceed without administrator privileges" -ForegroundColor DarkGray
     } else {
         Write-Host "[!] Administrator privileges required. Attempting UAC elevation..." -ForegroundColor Yellow
         $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`"")
         if ($SkipConfirmation)  { $argList += '-SkipConfirmation' }
         if ($KeepAlive)         { $argList += '-KeepAlive' }
+        if ($Deep)              { $argList += '-Deep' }
+        if ($IncludeShell)      { $argList += '-IncludeShell' }
         if ($PSBoundParameters.ContainsKey('GracefulTimeoutSec')) {
             $argList += @('-GracefulTimeoutSec', $GracefulTimeoutSec)
         }
@@ -76,6 +98,12 @@ if (-not (Test-IsAdmin)) {
         }
         exit 0
     }
+}
+
+# IncludeShell is meaningless without Deep — auto-enable
+if ($IncludeShell -and -not $Deep) {
+    Write-Host "[i] -IncludeShell used alone — -Deep is also auto-enabled" -ForegroundColor DarkGray
+    $Deep = $true
 }
 
 # ════════════════════════════════════════════════════════════════════
@@ -473,6 +501,201 @@ function Invoke-MemoryRecovery {
 }
 
 # ════════════════════════════════════════════════════════════════════
+# 6.5. -Diagnose: Show detailed memory distribution before recovery
+# ════════════════════════════════════════════════════════════════════
+function Show-MemoryDiagnostics {
+    Write-Host ""
+    Write-Host "╔══════════════════════════════════════════════════════════╗" -ForegroundColor Magenta
+    Write-Host "║                    Memory Diagnostics                     ║" -ForegroundColor Magenta
+    Write-Host "╚══════════════════════════════════════════════════════════╝" -ForegroundColor Magenta
+
+    # 1. Memory list distribution based on PerfCounter
+    Write-Host ""
+    Write-Host "── Memory list distribution ──" -ForegroundColor Cyan
+    try {
+        $counters = @(
+            '\Memory\Available MBytes',
+            '\Memory\Cache Bytes',
+            '\Memory\Modified Page List Bytes',
+            '\Memory\Standby Cache Normal Priority Bytes',
+            '\Memory\Standby Cache Reserve Bytes',
+            '\Memory\Standby Cache Core Bytes',
+            '\Memory\Free & Zero Page List Bytes'
+        )
+        $samples = (Get-Counter -Counter $counters -ErrorAction Stop).CounterSamples
+        foreach ($s in $samples) {
+            $name = ($s.Path -replace '.+\\Memory\\', '')
+            $val  = if ($name -eq 'Available MBytes') { '{0,8:N0} MB' -f $s.CookedValue }
+                    else { '{0,8:N0} MB' -f ($s.CookedValue / 1MB) }
+            Write-Host (" · {0,-44} {1}" -f $name, $val)
+        }
+    } catch {
+        Write-Host " [!] PerfCounter query failed: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+
+    # 2. Memory Compression Store
+    Write-Host ""
+    Write-Host "── Memory Compression Store ──" -ForegroundColor Cyan
+    try {
+        $mm = Get-MMAgent -ErrorAction Stop
+        Write-Host (" · MemoryCompression active: {0}" -f $mm.MemoryCompression)
+        $compProc = Get-Process -Name 'Memory Compression' -ErrorAction SilentlyContinue
+        if ($compProc) {
+            $compMB = [math]::Round($compProc.WorkingSet64 / 1MB, 1)
+            Write-Host (" · 'Memory Compression' process usage: {0,8:N1} MB" -f $compMB) -ForegroundColor Yellow
+            Write-Host "   → Can flush in -Deep mode"
+        } else {
+            Write-Host " · No process information for 'Memory Compression' (requires administrator privileges or is hidden in some builds)" -ForegroundColor DarkGray
+        }
+    } catch {
+        Write-Host " [!] MMAgent query failed: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+
+    # 3. Top memory-using processes Top 15 (working set basis)
+    Write-Host ""
+    Write-Host "── Top memory-using processes Top 15 (Working Set basis) ──" -ForegroundColor Cyan
+    Get-Process | Sort-Object WorkingSet64 -Descending | Select-Object -First 15 |
+        ForEach-Object {
+            $wsMB = [math]::Round($_.WorkingSet64 / 1MB, 1)
+            $cmMB = [math]::Round($_.PrivateMemorySize64 / 1MB, 1)
+            Write-Host (" · {0,-30} PID={1,-7} WS={2,8} MB  Commit={3,8} MB" -f $_.ProcessName, $_.Id, $wsMB, $cmMB)
+        }
+
+    # 4. Count of processes to terminate (actual recoverable amount preview)
+    Write-Host ""
+    Write-Host "── Target processes to terminate (Claude/Antigravity) ──" -ForegroundColor Cyan
+    $targets = Get-TargetProcesses
+    if ($targets.Count -eq 0) {
+        Write-Host " (none)" -ForegroundColor DarkGray
+    } else {
+        $tWS = [math]::Round((($targets | Measure-Object WorkingSetSize -Sum).Sum / 1MB), 1)
+        Write-Host (" · Total {0} processes / Working Set total {1:N1} MB recoverable" -f $targets.Count, $tWS)
+    }
+
+    Write-Host ""
+    Write-Host "╔══════════════════════════════════════════════════════════╗" -ForegroundColor Magenta
+    Write-Host "║  Done. Re-run without -Diagnose to reclaim.                ║" -ForegroundColor Magenta
+    Write-Host "╚══════════════════════════════════════════════════════════╝" -ForegroundColor Magenta
+}
+
+# ════════════════════════════════════════════════════════════════════
+# 7-A. Tier A: deep recovery (-Deep)
+#      Memory Compression Store flush + System Working Set + network cache
+# ════════════════════════════════════════════════════════════════════
+function Invoke-DeepRecovery {
+    param([switch]$DryRun)
+
+    Write-Host ""
+    Write-Host "── [Deep] Tier A — additional recovery ──" -ForegroundColor Cyan
+
+    if ($DryRun) {
+        Write-Host " [DRY] MMAgent restart / System WS / network cache call planned" -ForegroundColor DarkGray
+        return
+    }
+
+    # A1. Memory Compression Store flush
+    #     Principle: MemoryCompression is disabled then enabled again to release compressed pages
+    #     Warning: temporary memory usage spike possible (during decompression) → called after standby cleanup, so room is available
+    Write-Host -NoNewline " · Memory Compression Store flush ..."
+    try {
+        $mm = Get-MMAgent -ErrorAction Stop
+        if ($mm.MemoryCompression) {
+            Disable-MMAgent -MemoryCompression -ErrorAction Stop
+            Start-Sleep -Milliseconds 800
+            Enable-MMAgent -MemoryCompression -ErrorAction Stop
+            Write-Host " [OK] (compressed pages released)" -ForegroundColor Green
+        } else {
+            Write-Host " [skip] already disabled" -ForegroundColor DarkGray
+        }
+    } catch {
+        Write-Host " [!] failed: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+
+    # A2. System-wide Working Set empty (NT level bulk)
+    #     Includes system processes separately from the 6-1 per-process loop.
+    Write-Host -NoNewline " · System Working Set empty (NT) ..."
+    $rcWs = [MemoryAPI]::InvokeMemoryListCommand([MemoryAPI]::MemoryEmptyWorkingSets)
+    if ($rcWs -eq 0) {
+        Write-Host " [OK]" -ForegroundColor Green
+    } else {
+        Write-Host (" [!] NTSTATUS={0}" -f (Format-NTStatus $rcWs)) -ForegroundColor Yellow
+    }
+
+    # A3. network cache cleanup (DNS / NetBIOS / ARP)
+    Write-Host -NoNewline " · DNS cache ..."
+    try {
+        Clear-DnsClientCache -ErrorAction Stop
+        Write-Host " [OK]" -ForegroundColor Green
+    } catch {
+        Write-Host " [!] $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+
+    Write-Host -NoNewline " · NetBIOS cache ..."
+    $null = & nbtstat.exe -R 2>&1
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host " [OK]" -ForegroundColor Green
+    } else {
+        Write-Host " [!] nbtstat exit=$LASTEXITCODE" -ForegroundColor DarkGray
+    }
+
+    Write-Host -NoNewline " · ARP cache ..."
+    $null = & netsh.exe interface ip delete arpcache 2>&1
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host " [OK]" -ForegroundColor Green
+    } else {
+        Write-Host " [!] netsh exit=$LASTEXITCODE" -ForegroundColor DarkGray
+    }
+}
+
+# ════════════════════════════════════════════════════════════════════
+# 7-B. Tier B: shell restart (-IncludeShell)
+#      Explorer.exe + Windows Search restart — 200~500MB additional recovery
+#      Note: desktop flickers for 1~2 seconds, open File Explorer windows close
+# ════════════════════════════════════════════════════════════════════
+function Invoke-ShellRestart {
+    param([switch]$DryRun)
+
+    Write-Host ""
+    Write-Host "── [Deep+Shell] Tier B — shell restart ──" -ForegroundColor Cyan
+    Write-Host "  ! Desktop briefly flickers and open File Explorer windows close." -ForegroundColor Yellow
+
+    if ($DryRun) {
+        Write-Host " [DRY] explorer.exe + WSearch restart planned" -ForegroundColor DarkGray
+        return
+    }
+
+    # B1. Explorer.exe restart
+    Write-Host -NoNewline " · Explorer restart ..."
+    try {
+        $explorers = Get-Process -Name explorer -ErrorAction SilentlyContinue
+        $beforeMB = if ($explorers) { [math]::Round((($explorers | Measure-Object WorkingSet64 -Sum).Sum / 1MB), 1) } else { 0 }
+        $explorers | Stop-Process -Force -ErrorAction Stop
+        Start-Sleep -Milliseconds 1500
+        # Windows does not automatically restart explorer in some cases, so start it manually
+        if (-not (Get-Process -Name explorer -ErrorAction SilentlyContinue)) {
+            Start-Process -FilePath explorer.exe
+        }
+        Write-Host (" [OK] (previous usage {0} MB)" -f $beforeMB) -ForegroundColor Green
+    } catch {
+        Write-Host " [!] $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+
+    # B2. Windows Search service restart
+    Write-Host -NoNewline " · Windows Search restart ..."
+    try {
+        $svc = Get-Service -Name WSearch -ErrorAction Stop
+        if ($svc.Status -eq 'Running') {
+            Restart-Service -Name WSearch -Force -ErrorAction Stop
+            Write-Host " [OK]" -ForegroundColor Green
+        } else {
+            Write-Host " [skip] service is not running ($($svc.Status))" -ForegroundColor DarkGray
+        }
+    } catch {
+        Write-Host " [!] $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+}
+
+# ════════════════════════════════════════════════════════════════════
 # 8. Main
 # ════════════════════════════════════════════════════════════════════
 try { $Host.UI.RawUI.WindowTitle = 'Memory Reset — Claude Code & Antigravity' } catch {}
@@ -483,8 +706,20 @@ Write-Host "║      Memory Reset  —  Claude Code & Antigravity          ║" 
 Write-Host "║      (graceful kill + working-set + standby purge)       ║" -ForegroundColor Cyan
 Write-Host "╚══════════════════════════════════════════════════════════╝" -ForegroundColor Cyan
 
-if ($DryRun) {
-    Write-Host "[i] DRY-RUN mode — no actual termination/recovery" -ForegroundColor Magenta
+if ($DryRun)   { Write-Host "[i] DRY-RUN mode — no actual termination/recovery" -ForegroundColor Magenta }
+if ($Diagnose) { Write-Host "[i] DIAGNOSE mode — diagnostics only (read-only)" -ForegroundColor Magenta }
+if ($Deep)     { Write-Host "[i] DEEP mode — Tier A (Memory Compression flush + System WS + network cache) added" -ForegroundColor Magenta }
+if ($IncludeShell) { Write-Host "[!] SHELL restart mode — desktop briefly flickers (Tier B)" -ForegroundColor Yellow }
+
+# Diagnose mode outputs diagnostics only, then exits
+if ($Diagnose) {
+    Show-MemoryDiagnostics
+    if (-not $KeepAlive) {
+        Write-Host ""
+        Write-Host "[i] Press any key to close the window."
+        $null = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
+    }
+    exit 0
 }
 
 $before = Show-MemoryStatus -Label "Current memory status"
@@ -557,6 +792,10 @@ if (-not $SkipConfirmation -and -not $DryRun -and $targets.Count -gt 0) {
 
 Stop-TargetProcesses -Processes $targets -TimeoutSec $GracefulTimeoutSec -DryRun:$DryRun
 Invoke-MemoryRecovery -DryRun:$DryRun
+
+# v1.1: Optional steps
+if ($Deep)         { Invoke-DeepRecovery -DryRun:$DryRun }
+if ($IncludeShell) { Invoke-ShellRestart -DryRun:$DryRun }
 
 $after = Show-MemoryStatus -Label "Memory status after recovery"
 

@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] — 2026-04-19
+
+Closing the gap with reboot — additional reclamation tiers for stale caches.
+
+### Added
+- **`-Deep` flag (Tier A)**: Memory Compression Store flush (via MMAgent toggle) + System-wide Working Set empty (NT-level, command 2) + DNS / NetBIOS / ARP cache flush. Closes the largest practical gap with a fresh reboot.
+- **`-IncludeShell` flag (Tier B)**: Restarts `explorer.exe` and the Windows Search service. Reclaims 200~500 MB of accumulated shell/indexer caches. Auto-implies `-Deep`.
+- **`-Diagnose` flag**: Read-only memory analysis — perf counter breakdown (Standby Cache by priority, Modified Page List, Free & Zero, Cache), Memory Compression Store status, top 15 processes by working set + commit charge, and target process preview. UAC not required.
+- New launchers: `Run-Deep.bat`, `Run-Diagnose.bat`.
+- SYNOPSIS now documents the new flags with usage examples.
+
+### Notes
+- `-Deep` is safe and recommended. The Memory Compression flush briefly spikes RAM during decompression but happens *after* the standby purge so headroom is available.
+- `-IncludeShell` causes a 1~2 second desktop flicker. Open Explorer windows close. Avoid during a presentation.
+- Display adapter reset (Tier C in design notes) is intentionally NOT shipped — too risky for users running games / video / streaming. Use `Win+Ctrl+Shift+B` keyboard shortcut manually if needed.
+
 ## [1.0.0] — 2026-04-19
 
 Initial public release.

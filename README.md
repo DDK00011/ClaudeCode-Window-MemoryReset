@@ -56,6 +56,12 @@ Run-DryRun.bat
 
 :: 2. Main run (UAC prompt → approve)
 Run.bat
+
+:: 3. Deep recovery [v1.1+] — Memory Compression flush + System WS + network cache
+Run-Deep.bat
+
+:: Diagnostics only [v1.1+] (no UAC required) — view memory distribution/top memory-consuming processes
+Run-Diagnose.bat
 ```
 
 Or directly in PowerShell:
@@ -64,19 +70,40 @@ Or directly in PowerShell:
 # Standard run
 .\MemoryReset.ps1
 
-# For automation/scheduler
-.\MemoryReset.ps1 -SkipConfirmation -KeepAlive
+# Deep recovery — minimize gap with reboot
+.\MemoryReset.ps1 -Deep
 
-# Options
-.\MemoryReset.ps1 -GracefulTimeoutSec 12 -DryRun
+# Maximum recovery — Tier A + shell restart (desktop flickers for 1~2 seconds)
+.\MemoryReset.ps1 -Deep -IncludeShell
+
+# For automation/scheduler
+.\MemoryReset.ps1 -Deep -SkipConfirmation -KeepAlive
+
+# Diagnostics only
+.\MemoryReset.ps1 -Diagnose
 ```
 
 | Option | Meaning | Default |
 |------|------|--------|
 | `-GracefulTimeoutSec <n>` | Wait after CloseMainWindow (seconds) | `8` |
 | `-DryRun` | List targets only without termination/recovery (no UAC required) | off |
+| `-Deep` | **[v1.1+]** Memory Compression flush + System WS empty + DNS/NetBIOS/ARP cache | off |
+| `-IncludeShell` | **[v1.1+]** Explorer + Windows Search restart (`-Deep` automatically enabled) | off |
+| `-Diagnose` | **[v1.1+]** Memory distribution diagnostics only (no UAC required) | off |
 | `-SkipConfirmation` | Skip Y/n prompt | off |
 | `-KeepAlive` | Exit immediately after completion without waiting for key input | off |
+
+### Recommended scenarios by mode
+
+| Situation | Recommended command |
+|------|-----------|
+| Routine memory recovery | `Run.bat` |
+| Cleanup cumulative caches on a PC left running for days | `Run-Deep.bat` |
+| When you want a near-reboot experience | `MemoryReset.ps1 -Deep -IncludeShell` |
+| See what is occupying memory before recovery | `Run-Diagnose.bat` |
+| Preview only which processes will be terminated | `Run-DryRun.bat` |
+
+> **Note**: Memory Compression Store and Standby List can accumulate several GB on a PC that has been running for days. `-Deep` flushes both to narrow the gap with a reboot. However, kernel pool / GPU driver / page file area leaks fundamentally require a reboot (1 per week recommended).
 
 ## Target identification rules
 
