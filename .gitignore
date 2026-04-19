@@ -1,0 +1,33 @@
+# Logs
+*.log
+*.txt.bak
+recovery-history.csv
+
+# Local config / secrets
+.env
+.env.local
+secrets/
+*.pfx
+*.key
+
+# Windows artifacts
+Thumbs.db
+desktop.ini
+*.lnk
+
+# PowerShell artifacts
+*.ps1.bak
+PSScriptAnalyzerResults.txt
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS
+.DS_Store
+
+# Test outputs
+test-output/
+*.tmp
