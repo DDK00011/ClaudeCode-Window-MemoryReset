@@ -37,19 +37,38 @@
 
 .PARAMETER Diagnose
     [v1.1+] 회수 없이 진단만 수행 — 메모리 리스트 분포, 압축 store, 상위 점유 프로세스 표시.
+    [v1.3+] 좀비 분석 추가 — claude.exe 의 부모 IDE 생존 여부 분류.
     UAC 불필요.
+
+.PARAMETER KeepPids
+    [v1.3+] 종료 대상에서 제외할 PID (콤마 구분 문자열). 활성 세션 보존용.
+    예: -KeepPids "1234,5678,9012"
+
+.PARAMETER Interactive
+    [v1.3+] 종료 전 PID 별 보존 선택 프롬프트 표시. -SkipConfirmation 무시 (사용자 입력이 핵심).
+
+.PARAMETER OrphansOnly
+    [v1.3+] 부모 IDE extension host 가 죽은 claude.exe / node.exe 만 대상 (안전 모드).
+    활성 IDE 의 자식 프로세스는 절대 건드리지 않음.
 
 .EXAMPLE
     .\MemoryReset.ps1                                     # 기본 회수
     .\MemoryReset.ps1 -DryRun                             # 사전 확인
-    .\MemoryReset.ps1 -Diagnose                           # 메모리 분석만
+    .\MemoryReset.ps1 -Diagnose                           # 메모리 분석 + 좀비 분석
     .\MemoryReset.ps1 -Deep                               # Tier A 추가
     .\MemoryReset.ps1 -Deep -IncludeShell                 # Tier A + B
     .\MemoryReset.ps1 -SkipConfirmation -KeepAlive        # 자동화
+    .\MemoryReset.ps1 -OrphansOnly                        # [v1.3+] 좀비(부모 죽음) 만 정리
+    .\MemoryReset.ps1 -Interactive                        # [v1.3+] PID 선택 종료
+    .\MemoryReset.ps1 -KeepPids "1234,5678"               # [v1.3+] 명시 PID 보존
+    .\MemoryReset.ps1 -OrphansOnly -SkipConfirmation      # [v1.3+] 자동 좀비 정리
 
 .NOTES
     관리자 권한 항상 필요 (모든 모드). 미보유 시 자동 UAC 승격 시도.
     [v1.1.2 변경] DryRun / Diagnose 도 UAC 강제 — 보호 프로세스 정확 측정 + 보안 가시성.
+    [v1.3.0 추가] -KeepPids / -Interactive / -OrphansOnly — 활성 세션 보존 + 좀비 선별 종료.
+    [v1.3.0 추가] -Diagnose 에 좀비 분석 (부모 IDE 생존 여부 별 claude.exe 분류).
+    [v1.3.0 추가] VS Code 확장 (.vscode\extensions) 화이트리스트 명시 — 분류 정확도 ↑.
 #>
 
 [CmdletBinding()]
@@ -62,11 +81,31 @@ param(
     # v1.1 추가 ─────────────────────────────────────────────
     [switch]$Deep,           # Tier A: Memory Compression flush + System WS empty + 네트워크 캐시
     [switch]$IncludeShell,   # Tier B: Explorer.exe + Windows Search 재시작 (Deep 와 함께 사용)
-    [switch]$Diagnose        # 회수 전 메모리 분포 상세 표시
+    [switch]$Diagnose,       # 회수 전 메모리 분포 상세 표시
+
+    # v1.3 추가 ─────────────────────────────────────────────
+    # KeepPids: comma-separated string (e.g. "1234,5678") for safe round-trip across UAC elevation.
+    # PowerShell auto-binds both "1234,5678" and 1234,5678 syntax → string is most robust.
+    [string]$KeepPids = '',  # 종료 대상에서 제외할 PID (콤마 구분). 예: -KeepPids "1234,5678"
+    [switch]$Interactive,    # 종료 전 PID 별 선택 프롬프트 (보존할 것 선택)
+    [switch]$OrphansOnly     # IDE extension host 가 죽은 claude.exe 만 대상 (안전 모드)
 )
 
 $ErrorActionPreference = 'Continue'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+
+# ════════════════════════════════════════════════════════════════════
+# 0. [v1.3.0 보안] 입력 검증 — UAC 승격 전, 그 어떤 코드 실행보다 먼저.
+#    -KeepPids 값은 UAC 라운드트립을 거쳐 elevated PowerShell 의 명령행에 들어감.
+#    허용: 숫자 / 콤마 / space / tab 만. \s 전체 (\n,\r,\f,\v 포함) 는 명령행 parsing
+#    혼동 위험 → 명시적 [\d, \t] 로 제한.
+# ════════════════════════════════════════════════════════════════════
+if ($KeepPids -and $KeepPids -notmatch '^[\d, \t]*$') {
+    Write-Host "[X] -KeepPids 값에 허용되지 않는 문자 포함." -ForegroundColor Red
+    Write-Host "    허용: 숫자 / 콤마 / space / tab 만. 예: -KeepPids `"1234,5678,9012`"" -ForegroundColor Yellow
+    Write-Host ("    제공: '{0}'" -f ($KeepPids -replace '[\r\n]', '\n')) -ForegroundColor DarkGray
+    exit 1
+}
 
 # ════════════════════════════════════════════════════════════════════
 # 1. 관리자 권한 검사 + 자동 승격
@@ -91,6 +130,9 @@ if (-not (Test-IsAdmin)) {
     if ($Deep)              { $argList += '-Deep' }
     if ($IncludeShell)      { $argList += '-IncludeShell' }
     if ($Diagnose)          { $argList += '-Diagnose' }
+    if ($Interactive)       { $argList += '-Interactive' }
+    if ($OrphansOnly)       { $argList += '-OrphansOnly' }
+    if ($KeepPids)          { $argList += @('-KeepPids', "`"$KeepPids`"") }
     if ($PSBoundParameters.ContainsKey('GracefulTimeoutSec')) {
         $argList += @('-GracefulTimeoutSec', $GracefulTimeoutSec)
     }
@@ -298,22 +340,78 @@ function Show-MemoryStatus {
 }
 
 # ════════════════════════════════════════════════════════════════════
+# 5.0. Orphan / Extension-host 판별 헬퍼 (v1.3+)
+# ════════════════════════════════════════════════════════════════════
+function Test-IsClaudeOrphan {
+    # claude.exe / node.exe 의 부모 (IDE extension host 또는 셸 spawner) 가 살아있지 않으면 orphan.
+    # Windows 는 부모 죽어도 자식 cascade 종료 안 함 → orphan 누적 → 메모리 누수의 핵심 원인.
+    # PID 재사용 위험: 부모 PID 가 살아있어도 그 PID 가 legitimate spawner 가 아닌 다른 프로세스로 재할당된 경우 orphan.
+    # v1.3 강화: 합법 spawner 화이트리스트에 cmd/pwsh/powershell/bash/wsl/explorer 추가 — node.exe 가
+    #            npm script / 터미널 / cmd wrapper 로 떠 있는 정상 케이스를 orphan 으로 오분류하지 않도록.
+    param($ClaudeProc, $AllProcs)
+    $parent = $AllProcs | Where-Object { $_.ProcessId -eq $ClaudeProc.ParentProcessId } | Select-Object -First 1
+    if (-not $parent) { return $true }
+    return ($parent.Name -notmatch '(?i)^(Code|Antigravity|claude|cursor|windsurf|cmd|pwsh|powershell|bash|wsl|explorer|conhost)\.exe$')
+}
+
+function ConvertFrom-KeepPidsString {
+    # "1234,5678,9012" → [uint32[]]
+    # v1.3 강화: TryParse (overflow 방지) + invalid 경고 + array wrap (single-element unwrap 방지)
+    param([string]$Csv)
+    if (-not $Csv) { return ,@() }
+    $valid   = @()
+    $invalid = @()
+    foreach ($t in ($Csv -split ',')) {
+        $trimmed = $t.Trim()
+        if (-not $trimmed) { continue }
+        $parsed = [uint32]0
+        if ([uint32]::TryParse($trimmed, [ref]$parsed)) {
+            $valid += $parsed
+        } else {
+            $invalid += $trimmed
+        }
+    }
+    if ($invalid.Count -gt 0) {
+        Write-Host (" [!] -KeepPids 잘못된 항목 무시 ({0}개): {1}" -f $invalid.Count, ($invalid -join ', ')) -ForegroundColor Yellow
+    }
+    # ,$valid → PS 의 pipeline unwrap 방지 (단일 요소도 array 로 유지)
+    return ,$valid
+}
+
+# ════════════════════════════════════════════════════════════════════
 # 5. 대상 프로세스 식별
 #    핵심 안전장치: Claude Desktop 앱은 절대 매칭 금지 (다중 설치 경로 블랙리스트).
 #    오직 CLI / Antigravity 확장 / 표준 Node 패키지만 종료 대상.
+#    v1.3: -ExcludePids 로 보존, -OnlyOrphans 로 좀비만 선별.
 # ════════════════════════════════════════════════════════════════════
 function Get-TargetProcesses {
+    # reason: 화이트리스트 매칭 + 블랙리스트 + filter 통합 — 30줄 초과 불가피.
+    # 분리 시 매칭 규칙이 2곳에 흩어져 유지보수 비용 ↑.
+    param(
+        [uint32[]]$ExcludePids = @(),
+        [switch]$OnlyOrphans
+    )
     $allProcs = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue
 
     # ── Claude Code CLI 식별 ──
     # 화이트리스트(설치 경로) 기반: 아래 위치에서 실행되는 claude.exe/node.exe 만 대상.
-    #   1) %USERPROFILE%\.antigravity\extensions\anthropic.claude-code-*\
-    #   2) %USERPROFILE%\.cursor\extensions\anthropic.claude-code-*\
-    #   3) %APPDATA%\Claude\claude-code\<version>\claude.exe
-    #   4) %APPDATA%\npm\node_modules\@anthropic-ai\claude-code\bin\claude.exe (npm global)
-    #   5) node.exe with @anthropic-ai/claude-code in command line
-    #   6) claude.exe with --output-format stream-json (CLI signature arg)
+    #   1) %USERPROFILE%\.antigravity\extensions\anthropic.claude-code-*\         [v1.3+ anchored]
+    #   2) %USERPROFILE%\.cursor\extensions\anthropic.claude-code-*\              [v1.3+ anchored]
+    #   3) %USERPROFILE%\.vscode\extensions\anthropic.claude-code-*\              [v1.3+ anchored]
+    #   4) Claude\claude-code\<version>\claude.exe                                 (path contains)
+    #   5) npm\node_modules\@anthropic-ai\claude-code\                             (npm global)
+    #   6) node.exe with @anthropic-ai/claude-code in command line
+    #   7) claude.exe with --output-format stream-json + known path                [v1.3+ AND-gated]
     # 명시적 블랙리스트: Claude Desktop 앱의 알려진 모든 설치 경로 → 절대 매칭 금지.
+    # v1.3 보안: IDE 확장 경로는 %USERPROFILE% prefix 강제 — C:\evil\.vscode\... 위장 차단.
+    $userHomeExt = @(
+        (Join-Path $env:USERPROFILE '.antigravity\extensions\anthropic.claude-code-'),
+        (Join-Path $env:USERPROFILE '.cursor\extensions\anthropic.claude-code-'),
+        (Join-Path $env:USERPROFILE '.vscode\extensions\anthropic.claude-code-')
+    )
+    # 단독 신뢰 가능한 다른 위치 패턴 (anchored — path 의 substring 이 아니라 prefix/structural match)
+    $knownPathRegex = '(?i)(\\Claude\\claude-code\\|\\npm\\node_modules\\@anthropic-ai\\claude-code\\)'
+
     $claude = $allProcs | Where-Object {
         $exe = if ($_.ExecutablePath) { $_.ExecutablePath } else { '' }
         $cmd = if ($_.CommandLine)    { $_.CommandLine }    else { '' }
@@ -325,15 +423,20 @@ function Get-TargetProcesses {
         if ($exe -match '(?i)\\Program Files\\Claude\\Claude\.exe$')                     { return $false }
         if ($exe -match '(?i)\\Program Files \(x86\)\\Claude\\Claude\.exe$')             { return $false }
 
-        # 화이트리스트: CLI 경로 또는 시그니처 인수
-        ($_.Name -match '(?i)^claude\.exe$' -and (
-            $exe -match '(?i)\\\.antigravity\\extensions\\anthropic\.claude-code-' -or
-            $exe -match '(?i)\\\.cursor\\extensions\\anthropic\.claude-code-' -or
-            $exe -match '(?i)\\Claude\\claude-code\\' -or
-            $exe -match '(?i)\\claude-code\\.*?\\claude\.exe$' -or
-            $exe -match '(?i)\\npm\\node_modules\\@anthropic-ai\\claude-code\\' -or
-            $cmd -match '(?i)--output-format\s+stream-json'
-        )) -or
+        # 화이트리스트
+        # (a) IDE 확장 경로 — %USERPROFILE% prefix anchored (case-insensitive StartsWith)
+        $isUserExt = $false
+        if ($exe) {
+            foreach ($prefix in $userHomeExt) {
+                if ($exe.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) { $isUserExt = $true; break }
+            }
+        }
+        # (b) 다른 알려진 path pattern (npm global / standalone)
+        $isKnownPath = ($exe -match $knownPathRegex)
+        # (c) CLI 시그니처 인수 — 단독으로 신뢰 불가 (v1.3 보안). path 신호와 AND 결합.
+        $hasCliSignature = ($cmd -match '(?i)--output-format\s+stream-json') -and ($isUserExt -or $isKnownPath)
+
+        ($_.Name -match '(?i)^claude\.exe$' -and ($isUserExt -or $isKnownPath -or $hasCliSignature)) -or
         ($_.Name -eq 'node.exe' -and $cmd -match '(?i)@anthropic-ai[\\/]claude-code')
     }
 
@@ -351,6 +454,19 @@ function Get-TargetProcesses {
     $merged = @($claude) + @($antigravity) |
         Where-Object { $_.ProcessId -ne $self } |
         Sort-Object ProcessId -Unique
+
+    # v1.3: -ExcludePids — 사용자가 명시한 PID 는 종료 대상에서 제외 (활성 세션 보존)
+    if ($ExcludePids.Count -gt 0) {
+        $merged = $merged | Where-Object { $ExcludePids -notcontains $_.ProcessId }
+    }
+
+    # v1.3: -OnlyOrphans — IDE extension host 가 죽은 claude.exe/node.exe 만 남김.
+    # Antigravity 본체 (.exe 자체) 는 IDE 자체이므로 orphan 개념 무관 → 안전을 위해 OnlyOrphans 모드에서 제외.
+    if ($OnlyOrphans) {
+        $merged = $merged | Where-Object {
+            $_.Name -match '(?i)^(claude|node)\.exe$' -and (Test-IsClaudeOrphan -ClaudeProc $_ -AllProcs $allProcs)
+        }
+    }
 
     return $merged
 }
@@ -504,6 +620,69 @@ function Invoke-MemoryRecovery {
 }
 
 # ════════════════════════════════════════════════════════════════════
+# 6.4. 좀비 분석 — claude.exe 의 부모 (extension host) 생존 여부 분류 [v1.3+]
+#      "확실한 좀비 (부모 죽음)" vs "활성 그룹 (부모 IDE alive)" 분리.
+# ════════════════════════════════════════════════════════════════════
+function Show-ZombieAnalysis {
+    # reason: host 그루핑 + 분류 + 출력 + 요약이 한 UI 흐름 — 분리 시 출력 순서 깨짐.
+    Write-Host ""
+    Write-Host "── 좀비 분석 (Zombie Analysis) [v1.3+] ──" -ForegroundColor Cyan
+
+    $allProcs = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue
+    $targets  = @(Get-TargetProcesses)   # v1.3 안전: pipeline unwrap 방지
+    $claudes  = @($targets | Where-Object { $_.Name -match '(?i)^(claude|node)\.exe$' })
+
+    if ($claudes.Count -eq 0) {
+        Write-Host " (분석할 claude.exe / node.exe 프로세스 없음)" -ForegroundColor DarkGray
+        return
+    }
+
+    # 부모 PID 별 그룹화 — 같은 extension host 에서 spawn 된 claude 들이 묶임
+    $byHost = $claudes | Group-Object ParentProcessId | Sort-Object { [int]$_.Name }
+
+    $orphans = @()
+    foreach ($g in $byHost) {
+        $hostPid  = $g.Name
+        $hostProc = $allProcs | Where-Object { $_.ProcessId -eq [int]$hostPid } | Select-Object -First 1
+        $totalMB  = [math]::Round((($g.Group | Measure-Object WorkingSetSize -Sum).Sum / 1MB), 1)
+
+        if (-not $hostProc) {
+            Write-Host (" [DEAD] 부모 PID {0,-6} — claude {1}개 / {2} MB → 전부 orphan" -f $hostPid, $g.Count, $totalMB) -ForegroundColor Red
+            $orphans += $g.Group
+        } elseif ($hostProc.Name -notmatch '(?i)^(Code|Antigravity|claude|cursor|windsurf|cmd|pwsh|powershell|bash|wsl|explorer|conhost)\.exe$') {
+            Write-Host (" [REUSED] 부모 PID {0,-6} [{1}] PID 재사용 — claude {2}개 / {3} MB" -f $hostPid, $hostProc.Name, $g.Count, $totalMB) -ForegroundColor Red
+            $orphans += $g.Group
+        } else {
+            Write-Host (" [OK]   부모 PID {0,-6} [{1}] — claude {2}개 / {3} MB" -f $hostPid, $hostProc.Name, $g.Count, $totalMB) -ForegroundColor Yellow
+        }
+
+        # 상위 3개 자식 PID/WS 표시
+        $shown = 0
+        foreach ($p in ($g.Group | Sort-Object WorkingSetSize -Descending)) {
+            if ($shown -lt 3) {
+                Write-Host ("     -> PID={0,-7} WS={1,7} MB" -f $p.ProcessId, [math]::Round($p.WorkingSetSize/1MB,1)) -ForegroundColor DarkGray
+                $shown++
+            }
+        }
+        if ($g.Count -gt 3) {
+            Write-Host ("     -> ... 외 {0}개" -f ($g.Count - 3)) -ForegroundColor DarkGray
+        }
+    }
+
+    Write-Host ""
+    if ($orphans.Count -gt 0) {
+        $orphanMB = [math]::Round((($orphans | Measure-Object WorkingSetSize -Sum).Sum / 1MB), 1)
+        Write-Host (" [!] 확실한 좀비: {0}개 / {1} MB" -f $orphans.Count, $orphanMB) -ForegroundColor Red
+        Write-Host "    → 안전 종료:  .\MemoryReset.ps1 -OrphansOnly" -ForegroundColor Yellow
+    } else {
+        Write-Host " [OK] 부모 죽은 orphan 없음 (모든 claude.exe 의 부모 IDE alive)" -ForegroundColor Green
+        Write-Host "      → 활성 세션 수보다 claude.exe 가 많다면 IDE 내부 잉여:" -ForegroundColor DarkGray
+        Write-Host '        .\MemoryReset.ps1 -Interactive          (PID 선택 종료)'         -ForegroundColor DarkGray
+        Write-Host '        .\MemoryReset.ps1 -KeepPids "PID1,PID2" (보존할 PID 지정)'      -ForegroundColor DarkGray
+    }
+}
+
+# ════════════════════════════════════════════════════════════════════
 # 6.5. -Diagnose: 회수 전 메모리 분포 상세 표시
 # ════════════════════════════════════════════════════════════════════
 function Show-MemoryDiagnostics {
@@ -570,13 +749,16 @@ function Show-MemoryDiagnostics {
     # 4. 종료 대상 프로세스 카운트 (실제 회수 가능량 미리보기)
     Write-Host ""
     Write-Host "── 종료 대상 프로세스 (Claude/Antigravity) ──" -ForegroundColor Cyan
-    $targets = Get-TargetProcesses
+    $targets = @(Get-TargetProcesses)   # v1.3 안전: pipeline unwrap 방지
     if ($targets.Count -eq 0) {
         Write-Host " (없음)" -ForegroundColor DarkGray
     } else {
         $tWS = [math]::Round((($targets | Measure-Object WorkingSetSize -Sum).Sum / 1MB), 1)
         Write-Host (" · 총 {0} 개 프로세스 / Working Set 합계 {1:N1} MB 회수 가능" -f $targets.Count, $tWS)
     }
+
+    # 5. v1.3+: 좀비 분석 — 확실한 좀비(부모 죽음) vs 활성(부모 IDE alive) 분리
+    Show-ZombieAnalysis
 
     Write-Host ""
     Write-Host "╔══════════════════════════════════════════════════════════╗" -ForegroundColor Magenta
@@ -859,6 +1041,12 @@ if ($DryRun)   { Write-Host "[i] DRY-RUN 모드 — 실제 종료/회수 없음"
 if ($Diagnose) { Write-Host "[i] DIAGNOSE 모드 — 진단만 수행 (read-only)" -ForegroundColor Magenta }
 if ($Deep)     { Write-Host "[i] DEEP 모드 — Tier A (Memory Compression flush + System WS + 네트워크 캐시) 추가" -ForegroundColor Magenta }
 if ($IncludeShell) { Write-Host "[!] SHELL 재시작 모드 — 데스크톱이 잠시 깜빡입니다 (Tier B)" -ForegroundColor Yellow }
+# v1.3+
+if ($OrphansOnly)  { Write-Host "[i] ORPHANS-ONLY 모드 — 부모 IDE 죽은 claude.exe / node.exe 만 대상" -ForegroundColor Magenta }
+if ($Interactive)  { Write-Host "[i] INTERACTIVE 모드 — 종료 전 PID 별 보존 선택" -ForegroundColor Magenta }
+if ($Interactive -and $DryRun) {
+    Write-Host "[!] -DryRun + -Interactive 조합 — Interactive 프롬프트는 DryRun 시 무시됩니다 (실제 종료 안 함)" -ForegroundColor Yellow
+}
 
 # Diagnose 모드는 진단만 출력하고 종료
 if ($Diagnose) {
@@ -873,9 +1061,16 @@ if ($Diagnose) {
 
 $before = Show-MemoryStatus -Label "현재 메모리 상태"
 
+# v1.3: KeepPids 파싱 (CSV 문자열 → [uint32[]])
+$excludePidsArray = ConvertFrom-KeepPidsString -Csv $KeepPids
+if ($excludePidsArray.Count -gt 0) {
+    Write-Host ""
+    Write-Host (" [i] 보존 PID ({0}개): {1}" -f $excludePidsArray.Count, ($excludePidsArray -join ', ')) -ForegroundColor Cyan
+}
+
 Write-Host ""
 Write-Host "── 종료 대상 프로세스 ──" -ForegroundColor Cyan
-$targets = Get-TargetProcesses
+$targets = @(Get-TargetProcesses -ExcludePids $excludePidsArray -OnlyOrphans:$OrphansOnly)
 if ($targets.Count -eq 0) {
     Write-Host " (대상 없음 — Standby List 정리만 수행됩니다)" -ForegroundColor DarkGray
 } else {
@@ -885,6 +1080,7 @@ if ($targets.Count -eq 0) {
         if ($p.ExecutablePath -match '(?i)\\Programs\\Antigravity\\')                              { return 'Antigravity' }
         if ($p.ExecutablePath -match '(?i)\\\.antigravity\\extensions')                            { return 'Claude(Antigravity ext)' }
         if ($p.ExecutablePath -match '(?i)\\\.cursor\\extensions')                                 { return 'Claude(Cursor ext)' }
+        if ($p.ExecutablePath -match '(?i)\\\.vscode\\extensions')                                 { return 'Claude(VS Code ext)' }
         if ($p.ExecutablePath -match '(?i)\\npm\\node_modules\\@anthropic-ai\\claude-code')        { return 'Claude(npm global)' }
         if ($p.ExecutablePath -match '(?i)\\Claude\\claude-code\\')                                { return 'Claude(standalone)' }
         if ($p.Name -eq 'node.exe')                                                                { return 'Claude(node)' }
@@ -923,6 +1119,24 @@ if ($targets.Count -eq 0) {
         $dCount = @($desktopApp).Count
         $dMB = [math]::Round((($desktopApp | Measure-Object WorkingSetSize -Sum).Sum / 1MB), 1)
         Write-Host (" ── 보존 (종료 안 함): Claude Desktop 앱 {0}개 / {1:N1} MB" -f $dCount, $dMB) -ForegroundColor Green
+    }
+}
+
+# v1.3: Interactive 모드 — 종료 전 보존 PID 선택 (-SkipConfirmation 무시 — 사용자 입력이 핵심)
+if ($Interactive -and -not $DryRun -and $targets.Count -gt 0) {
+    Write-Host ""
+    Write-Host "── [Interactive] 보존할 PID 선택 ──" -ForegroundColor Cyan
+    Write-Host "  위 목록에서 살릴 PID 를 콤마로 입력. 빈 입력 = 전부 종료 (기본)" -ForegroundColor DarkGray
+    $userInput = Read-Host "  보존할 PID (예: 1234,5678)"
+    $keepInteractive = ConvertFrom-KeepPidsString -Csv $userInput
+    if ($keepInteractive.Count -gt 0) {
+        $targets = @($targets | Where-Object { $keepInteractive -notcontains $_.ProcessId })
+        Write-Host (" [i] 보존: {0}개 PID — 남은 종료 대상: {1}개" -f $keepInteractive.Count, $targets.Count) -ForegroundColor Green
+        if ($targets.Count -eq 0) {
+            Write-Host " [i] 종료할 프로세스 없음. Standby List 정리만 진행." -ForegroundColor DarkGray
+        }
+    } else {
+        Write-Host " [i] 보존 PID 없음 — 전부 종료 진행." -ForegroundColor DarkGray
     }
 }
 

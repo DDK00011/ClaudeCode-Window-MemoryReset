@@ -5,6 +5,54 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] — 2026-05-23
+
+Selective termination + zombie analysis — preserve active sessions, kill only what is dead or excess.
+
+### Added — Selective termination
+- **`-KeepPids "<csv>"`** — comma-separated PID list excluded from termination. Use when you want to preserve known-active Claude Code sessions and clean only the rest. Example: `MemoryReset.ps1 -KeepPids "1234,5678"`.
+- **`-Interactive`** — after the kill-target list prints, prompts for "preserve which PIDs?" interactively. Overrides `-SkipConfirmation` (user input is the point). Empty input = kill all (current behavior).
+- **`-OrphansOnly`** — kills only `claude.exe` / `node.exe` whose parent IDE extension host is dead (true zombies). Antigravity main processes are excluded from this mode by design (they ARE the IDE, not a child of one). Safest mode — never touches active sessions.
+
+### Added — Zombie analysis (`-Diagnose` mode)
+- New `Show-ZombieAnalysis` function groups `claude.exe` by `ParentProcessId` and classifies each parent as:
+  - **`[OK]`** — parent is an alive IDE host (`Code.exe`, `Antigravity.exe`, `claude.exe`, `cursor.exe`, `windsurf.exe`)
+  - **`[DEAD]`** — parent PID no longer exists → all children are confirmed orphans
+  - **`[REUSED]`** — parent PID exists but the process is not an IDE host → PID was recycled, children are orphans
+- Surfaces an exact "confirmed zombie count + MB" with a copy-paste-ready `-OrphansOnly` recommendation.
+- When no orphans are found but `claude.exe` count exceeds active sessions, suggests `-Interactive` / `-KeepPids` for the IDE-internal-excess case.
+
+### Added — VS Code extension path (explicit)
+- Whitelist now includes `%USERPROFILE%\.vscode\extensions\anthropic.claude-code-*\` — previously matched only via the `--output-format stream-json` command-line signature, which categorized as "기타(unknown)".
+- New category: `'Claude(VS Code ext)'` in the categorizer for clearer DryRun / Diagnose output.
+
+### Changed
+- `Get-TargetProcesses` signature: now accepts `-ExcludePids [uint32[]]` and `-OnlyOrphans [switch]`. Backward compatible — both parameters default to "no filter" so existing callers behave identically.
+- UAC elevation argument forwarding (line ~88) now propagates `-KeepPids`, `-Interactive`, `-OrphansOnly` across the privilege boundary.
+
+### Added — Helpers
+- `Test-IsClaudeOrphan` — boolean test for "is this claude.exe an orphan?" considering both dead-parent and PID-reuse cases.
+- `ConvertFrom-KeepPidsString` — robust CSV → `[uint32[]]` parser, tolerates whitespace and invalid entries silently.
+
+### Why this release
+Diagnosis on production user environment (DDR4 64 GB, simultaneous VS Code + Antigravity) revealed:
+- claude.exe **本体** (300–400 MB each) is the dominant memory consumer, not the grandchild `node.exe` MCP servers (60 MB each).
+- Active IDE chat tabs spawn claude.exe, but the IDE's extension host frequently fails to cascade-kill on tab-close (Windows `TerminateProcess` is non-recursive). Result: 4–7 orphan `claude.exe` accumulate per IDE within a normal work session.
+- Existing v1.2.x killed everything — including active sessions the user wanted to keep. v1.3 adds the selective scalpel.
+
+### Security hardening (Round 2 — independent agent review)
+- **P0: `-KeepPids` command injection** — value flows through `Start-Process -Verb RunAs -ArgumentList` to re-elevate. Pre-v1.3.0-final, no input validation existed: `-KeepPids '1234"; Start-Process calc.exe; #'` could execute arbitrary code in the elevated PowerShell. Fix: regex whitelist `^[\d,\s]*$` enforced **before** any UAC elevation, at the very top of the script (line ~73). Reject + exit 1 on any non-digit/comma/space character.
+- **P0: Whitelist path bypass** — `\\\.vscode\\extensions\\anthropic\.claude-code-` matched anywhere in the path, so `C:\evil\.vscode\extensions\anthropic.claude-code-fake\claude.exe` (user-writable!) was killable by admin. Fix: IDE extension paths now require `%USERPROFILE%` prefix via `String.StartsWith(..., OrdinalIgnoreCase)` — no substring matches. Spoofed `claude.exe` in user-writable locations outside `%USERPROFILE%\.{vscode,cursor,antigravity}\extensions\anthropic.claude-code-*\` cannot trigger an admin kill.
+- **P0: CLI signature alone insufficient** — `--output-format stream-json` previously allowed killing any `claude.exe` regardless of path. Fix: signature is now AND-gated with path requirement (`isUserExt -or isKnownPath` must hold).
+- **P1: `ConvertFrom-KeepPidsString` overflow & unwrap** — was using bare `[uint32]$t` cast (throws on overflow) and pipeline-style `Where-Object` (PowerShell unwraps single-element returns to scalar). Fix: `[uint32]::TryParse` for safe parsing + `,$valid` array-wrap + Yellow warning for invalid entries (user sees typos instead of silent drop).
+- **P1: `Test-IsClaudeOrphan` over-aggressive orphan flag** — only IDE process names (Code/Antigravity/...) counted as legitimate parents. Legitimate `node.exe` spawned via `cmd.exe` / `pwsh.exe` / `bash.exe` (npm scripts, terminal-invoked CLI) was wrongly flagged orphan → could be killed under `-OrphansOnly`. Fix: parent whitelist extended to `cmd|pwsh|powershell|bash|wsl|explorer|conhost`.
+- **P1: Null-safe `@()` wrapping** — `$targets = Get-TargetProcesses ...` called 3 times in the script; if the pipeline yielded zero results, `$targets.Count` worked on PS 5.1 but threw on strict-mode hosts. Now `@(Get-TargetProcesses ...)` everywhere.
+- **P1: `-Interactive` + `-DryRun` silent skip warning** — combination silently bypassed the Interactive prompt (Read-Host inside `if (-not $DryRun)`). Now prints a Yellow `[!]` warning explaining the precedence.
+
+### Known limitations (not fixed in v1.3.0 — future work)
+- **Graceful-kill race window**: between `Get-CimInstance` enumeration and `taskkill /F /T`, 8 seconds elapse for graceful shutdown. A target PID could theoretically be freed and reassigned by the OS, causing `taskkill` to act on an unrelated process. Pre-existing risk (v1.0+), not introduced by v1.3. Mitigation: re-verify PID identity by process name + start-time before kill — deferred to v1.4.
+- **Tray daemon does not currently expose v1.3 flags**: `-KeepPids` / `-Interactive` / `-OrphansOnly` are accessible only via CLI. Tray menu integration deferred to v1.4.
+
 ## [1.2.1] — 2026-04-19
 
 Hardening patch — addresses Round 1 self-review and Round 2 independent agent review of the v1.2.0 tray daemon.
