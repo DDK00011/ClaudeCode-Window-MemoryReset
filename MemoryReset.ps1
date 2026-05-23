@@ -37,19 +37,38 @@
 
 .PARAMETER Diagnose
     [v1.1+] Run diagnostics only without recovery — show memory list distribution, compression store, top consuming processes.
+    [v1.3+] Added orphan analysis — classify claude.exe by parent IDE survival.
     No UAC required.
+
+.PARAMETER KeepPids
+    [v1.3+] PID to exclude from termination targets (comma-separated string). To preserve active sessions.
+    Example: -KeepPids "1234,5678,9012"
+
+.PARAMETER Interactive
+    [v1.3+] Show prompt to select each PID to preserve before termination. Ignore -SkipConfirmation (user input is essential).
+
+.PARAMETER OrphansOnly
+    [v1.3+] Target only claude.exe / node.exe with dead parent IDE extension host (safe mode).
+    Never touch child processes of active IDE.
 
 .EXAMPLE
     .\MemoryReset.ps1                                     # default recovery
     .\MemoryReset.ps1 -DryRun                             # precheck
-    .\MemoryReset.ps1 -Diagnose                           # Memory analysis only
+    .\MemoryReset.ps1 -Diagnose                           # memory analysis + orphan analysis
     .\MemoryReset.ps1 -Deep                               # Tier A addition
     .\MemoryReset.ps1 -Deep -IncludeShell                 # Tier A + B
     .\MemoryReset.ps1 -SkipConfirmation -KeepAlive        # automation
+    .\MemoryReset.ps1 -OrphansOnly                        # [v1.3+] cleanup only orphans (dead parents)
+    .\MemoryReset.ps1 -Interactive                        # [v1.3+] PID selection termination
+    .\MemoryReset.ps1 -KeepPids "1234,5678"               # [v1.3+] explicit PID preservation
+    .\MemoryReset.ps1 -OrphansOnly -SkipConfirmation      # [v1.3+] automatic orphan cleanup
 
 .NOTES
     Administrator privileges always required (all modes). Automatically attempts UAC elevation if unavailable.
     [v1.1.2 change] Force UAC also for DryRun / Diagnose — accurate measurement of protected processes + security visibility.
+    [v1.3.0 added] -KeepPids / -Interactive / -OrphansOnly — preserve active sessions + selective orphan termination.
+    [v1.3.0 added] Orphan analysis in -Diagnose (classify claude.exe by parent IDE survival).
+    [v1.3.0 added] Explicit VS Code extension (.vscode\extensions) whitelist — classification accuracy ↑.
 #>
 
 [CmdletBinding()]
@@ -62,11 +81,31 @@ param(
     # v1.1 added ─────────────────────────────────────────────
     [switch]$Deep,           # Tier A: Memory Compression flush + System WS empty + network cache
     [switch]$IncludeShell,   # Tier B: Explorer.exe + Windows Search restart (use with Deep)
-    [switch]$Diagnose        # Show detailed memory distribution before recovery
+    [switch]$Diagnose,       # detailed memory distribution display before recovery
+
+    # v1.3 added ─────────────────────────────────────────────
+    # KeepPids: comma-separated string (e.g. "1234,5678") for safe round-trip across UAC elevation.
+    # PowerShell auto-binds both "1234,5678" and 1234,5678 syntax → string is most robust.
+    [string]$KeepPids = '',  # PID to exclude from termination targets (comma-separated). Example: -KeepPids "1234,5678"
+    [switch]$Interactive,    # prompt to select each PID before termination (select items to preserve)
+    [switch]$OrphansOnly     # Only claude.exe with dead IDE extension host is targeted (safe mode)
 )
 
 $ErrorActionPreference = 'Continue'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+
+# ════════════════════════════════════════════════════════════════════
+# 0. [v1.3.0 security] Input validation — before UAC elevation, before executing any code.
+#    -KeepPids value enters elevated PowerShell command line through UAC round trip.
+#    Allowed: numbers / commas / space / tab only. All \s (\n,\r,\f,\v included) risks command line parsing
+#    confusion risk → restrict to explicit [\d, \t].
+# ════════════════════════════════════════════════════════════════════
+if ($KeepPids -and $KeepPids -notmatch '^[\d, \t]*$') {
+    Write-Host "[X] -KeepPids value contains disallowed characters." -ForegroundColor Red
+    Write-Host "    Allowed: numbers / commas / space / tab only. Example: -KeepPids `"1234,5678,9012`"" -ForegroundColor Yellow
+    Write-Host ("    Provided: '{0}'" -f ($KeepPids -replace '[\r\n]', '\n')) -ForegroundColor DarkGray
+    exit 1
+}
 
 # ════════════════════════════════════════════════════════════════════
 # 1. Administrator privileges check + automatic elevation
@@ -91,6 +130,9 @@ if (-not (Test-IsAdmin)) {
     if ($Deep)              { $argList += '-Deep' }
     if ($IncludeShell)      { $argList += '-IncludeShell' }
     if ($Diagnose)          { $argList += '-Diagnose' }
+    if ($Interactive)       { $argList += '-Interactive' }
+    if ($OrphansOnly)       { $argList += '-OrphansOnly' }
+    if ($KeepPids)          { $argList += @('-KeepPids', "`"$KeepPids`"") }
     if ($PSBoundParameters.ContainsKey('GracefulTimeoutSec')) {
         $argList += @('-GracefulTimeoutSec', $GracefulTimeoutSec)
     }
@@ -298,22 +340,78 @@ function Show-MemoryStatus {
 }
 
 # ════════════════════════════════════════════════════════════════════
+# 5.0. Orphan / Extension-host detection helpers (v1.3+)
+# ════════════════════════════════════════════════════════════════════
+function Test-IsClaudeOrphan {
+    # The parent of claude.exe / node.exe (IDE extension host or shell spawner) is orphan if not alive.
+    # Windows does not terminate children in cascade when parent dies → orphan buildup → main cause of memory leaks.
+    # PID reuse risk: even if parent PID is alive, it is orphan when that PID is reassigned to another process instead of a legitimate spawner.
+    # v1.3 hardened: add cmd/pwsh/powershell/bash/wsl/explorer to legitimate spawner whitelist — node.exe
+    #            so normal cases where node.exe runs through npm script / terminal / cmd wrapper are not misclassified as orphan.
+    param($ClaudeProc, $AllProcs)
+    $parent = $AllProcs | Where-Object { $_.ProcessId -eq $ClaudeProc.ParentProcessId } | Select-Object -First 1
+    if (-not $parent) { return $true }
+    return ($parent.Name -notmatch '(?i)^(Code|Antigravity|claude|cursor|windsurf|cmd|pwsh|powershell|bash|wsl|explorer|conhost)\.exe$')
+}
+
+function ConvertFrom-KeepPidsString {
+    # "1234,5678,9012" → [uint32[]]
+    # v1.3 hardened: TryParse (prevent overflow) + invalid warning + array wrap (prevent single-element unwrap)
+    param([string]$Csv)
+    if (-not $Csv) { return ,@() }
+    $valid   = @()
+    $invalid = @()
+    foreach ($t in ($Csv -split ',')) {
+        $trimmed = $t.Trim()
+        if (-not $trimmed) { continue }
+        $parsed = [uint32]0
+        if ([uint32]::TryParse($trimmed, [ref]$parsed)) {
+            $valid += $parsed
+        } else {
+            $invalid += $trimmed
+        }
+    }
+    if ($invalid.Count -gt 0) {
+        Write-Host (" [!] Ignore invalid -KeepPids entries ({0} items): {1}" -f $invalid.Count, ($invalid -join ', ')) -ForegroundColor Yellow
+    }
+    # ,$valid → prevent PS pipeline unwrap (keep a single element as array too)
+    return ,$valid
+}
+
+# ════════════════════════════════════════════════════════════════════
 # 5. Identify target processes
 #    Core safety guard: never match Claude Desktop app (blacklist for multiple install paths).
 #    Only CLI / Antigravity extensions / standard Node packages are termination targets.
+#    v1.3: preserve with -ExcludePids, select only orphans with -OnlyOrphans.
 # ════════════════════════════════════════════════════════════════════
 function Get-TargetProcesses {
+    # reason: whitelist matching + blacklist + integrated filter — over 30 lines unavoidable.
+    # Splitting scatters matching rules across 2 places, increasing maintenance cost ↑.
+    param(
+        [uint32[]]$ExcludePids = @(),
+        [switch]$OnlyOrphans
+    )
     $allProcs = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue
 
     # ── Identify Claude Code CLI ──
     # Whitelist(install paths) based: only target claude.exe/node.exe run from locations below.
-    #   1) %USERPROFILE%\.antigravity\extensions\anthropic.claude-code-*\
-    #   2) %USERPROFILE%\.cursor\extensions\anthropic.claude-code-*\
-    #   3) %APPDATA%\Claude\claude-code\<version>\claude.exe
-    #   4) %APPDATA%\npm\node_modules\@anthropic-ai\claude-code\bin\claude.exe (npm global)
-    #   5) node.exe with @anthropic-ai/claude-code in command line
-    #   6) claude.exe with --output-format stream-json (CLI signature arg)
+    #   1) %USERPROFILE%\.antigravity\extensions\anthropic.claude-code-*\         [v1.3+ anchored]
+    #   2) %USERPROFILE%\.cursor\extensions\anthropic.claude-code-*\              [v1.3+ anchored]
+    #   3) %USERPROFILE%\.vscode\extensions\anthropic.claude-code-*\              [v1.3+ anchored]
+    #   4) Claude\claude-code\<version>\claude.exe                                 (path contains)
+    #   5) npm\node_modules\@anthropic-ai\claude-code\                             (npm global)
+    #   6) node.exe with @anthropic-ai/claude-code in command line
+    #   7) claude.exe with --output-format stream-json + known path                [v1.3+ AND-gated]
     # Explicit blacklist: all known install paths for Claude Desktop app → never match.
+    # v1.3 security: force %USERPROFILE% prefix for IDE extension paths — block C:\evil\.vscode\... spoofing.
+    $userHomeExt = @(
+        (Join-Path $env:USERPROFILE '.antigravity\extensions\anthropic.claude-code-'),
+        (Join-Path $env:USERPROFILE '.cursor\extensions\anthropic.claude-code-'),
+        (Join-Path $env:USERPROFILE '.vscode\extensions\anthropic.claude-code-')
+    )
+    # Other standalone trusted location patterns (anchored — prefix/structural match rather than path substring)
+    $knownPathRegex = '(?i)(\\Claude\\claude-code\\|\\npm\\node_modules\\@anthropic-ai\\claude-code\\)'
+
     $claude = $allProcs | Where-Object {
         $exe = if ($_.ExecutablePath) { $_.ExecutablePath } else { '' }
         $cmd = if ($_.CommandLine)    { $_.CommandLine }    else { '' }
@@ -325,15 +423,20 @@ function Get-TargetProcesses {
         if ($exe -match '(?i)\\Program Files\\Claude\\Claude\.exe$')                     { return $false }
         if ($exe -match '(?i)\\Program Files \(x86\)\\Claude\\Claude\.exe$')             { return $false }
 
-        # Whitelist: CLI path or signature argument
-        ($_.Name -match '(?i)^claude\.exe$' -and (
-            $exe -match '(?i)\\\.antigravity\\extensions\\anthropic\.claude-code-' -or
-            $exe -match '(?i)\\\.cursor\\extensions\\anthropic\.claude-code-' -or
-            $exe -match '(?i)\\Claude\\claude-code\\' -or
-            $exe -match '(?i)\\claude-code\\.*?\\claude\.exe$' -or
-            $exe -match '(?i)\\npm\\node_modules\\@anthropic-ai\\claude-code\\' -or
-            $cmd -match '(?i)--output-format\s+stream-json'
-        )) -or
+        # Whitelist
+        # (a) IDE extension path — %USERPROFILE% prefix anchored (case-insensitive StartsWith)
+        $isUserExt = $false
+        if ($exe) {
+            foreach ($prefix in $userHomeExt) {
+                if ($exe.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) { $isUserExt = $true; break }
+            }
+        }
+        # (b) other known path pattern (npm global / standalone)
+        $isKnownPath = ($exe -match $knownPathRegex)
+        # (c) CLI signature arguments — cannot trust alone (v1.3 security). Combine with path signal using AND.
+        $hasCliSignature = ($cmd -match '(?i)--output-format\s+stream-json') -and ($isUserExt -or $isKnownPath)
+
+        ($_.Name -match '(?i)^claude\.exe$' -and ($isUserExt -or $isKnownPath -or $hasCliSignature)) -or
         ($_.Name -eq 'node.exe' -and $cmd -match '(?i)@anthropic-ai[\\/]claude-code')
     }
 
@@ -351,6 +454,19 @@ function Get-TargetProcesses {
     $merged = @($claude) + @($antigravity) |
         Where-Object { $_.ProcessId -ne $self } |
         Sort-Object ProcessId -Unique
+
+    # v1.3: -ExcludePids — exclude user-specified PIDs from termination targets (preserve active sessions)
+    if ($ExcludePids.Count -gt 0) {
+        $merged = $merged | Where-Object { $ExcludePids -notcontains $_.ProcessId }
+    }
+
+    # v1.3: -OnlyOrphans — retain only claude.exe/node.exe where IDE extension host has died.
+    # Antigravity main app (.exe itself) is the IDE, so orphan concept does not apply → excluded in OnlyOrphans mode for safety.
+    if ($OnlyOrphans) {
+        $merged = $merged | Where-Object {
+            $_.Name -match '(?i)^(claude|node)\.exe$' -and (Test-IsClaudeOrphan -ClaudeProc $_ -AllProcs $allProcs)
+        }
+    }
 
     return $merged
 }
@@ -504,6 +620,69 @@ function Invoke-MemoryRecovery {
 }
 
 # ════════════════════════════════════════════════════════════════════
+# 6.4. Zombie analysis — claude.exe parent (extension host) survival status classification [v1.3+]
+#      "Definite zombies (parent dead)" vs "active groups (parent IDE alive)" separate.
+# ════════════════════════════════════════════════════════════════════
+function Show-ZombieAnalysis {
+    # reason: host grouping + classification + output + summary form one UI flow — separating breaks output order.
+    Write-Host ""
+    Write-Host "── Zombie analysis [v1.3+] ──" -ForegroundColor Cyan
+
+    $allProcs = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue
+    $targets  = @(Get-TargetProcesses)   # v1.3 safety: prevent pipeline unwrap
+    $claudes  = @($targets | Where-Object { $_.Name -match '(?i)^(claude|node)\.exe$' })
+
+    if ($claudes.Count -eq 0) {
+        Write-Host " (No claude.exe / node.exe processes to analyze)" -ForegroundColor DarkGray
+        return
+    }
+
+    # Group by parent PID — claude instances spawned from the same extension host are grouped
+    $byHost = $claudes | Group-Object ParentProcessId | Sort-Object { [int]$_.Name }
+
+    $orphans = @()
+    foreach ($g in $byHost) {
+        $hostPid  = $g.Name
+        $hostProc = $allProcs | Where-Object { $_.ProcessId -eq [int]$hostPid } | Select-Object -First 1
+        $totalMB  = [math]::Round((($g.Group | Measure-Object WorkingSetSize -Sum).Sum / 1MB), 1)
+
+        if (-not $hostProc) {
+            Write-Host (" [DEAD] parent PID {0,-6} — claude {1} / {2} MB → all are orphan" -f $hostPid, $g.Count, $totalMB) -ForegroundColor Red
+            $orphans += $g.Group
+        } elseif ($hostProc.Name -notmatch '(?i)^(Code|Antigravity|claude|cursor|windsurf|cmd|pwsh|powershell|bash|wsl|explorer|conhost)\.exe$') {
+            Write-Host (" [REUSED] parent PID {0,-6} [{1}] PID reused — claude {2} / {3} MB" -f $hostPid, $hostProc.Name, $g.Count, $totalMB) -ForegroundColor Red
+            $orphans += $g.Group
+        } else {
+            Write-Host (" [OK]   parent PID {0,-6} [{1}] — claude {2} / {3} MB" -f $hostPid, $hostProc.Name, $g.Count, $totalMB) -ForegroundColor Yellow
+        }
+
+        # Show top 3 child PID/WS
+        $shown = 0
+        foreach ($p in ($g.Group | Sort-Object WorkingSetSize -Descending)) {
+            if ($shown -lt 3) {
+                Write-Host ("     -> PID={0,-7} WS={1,7} MB" -f $p.ProcessId, [math]::Round($p.WorkingSetSize/1MB,1)) -ForegroundColor DarkGray
+                $shown++
+            }
+        }
+        if ($g.Count -gt 3) {
+            Write-Host ("     -> ... {0} more" -f ($g.Count - 3)) -ForegroundColor DarkGray
+        }
+    }
+
+    Write-Host ""
+    if ($orphans.Count -gt 0) {
+        $orphanMB = [math]::Round((($orphans | Measure-Object WorkingSetSize -Sum).Sum / 1MB), 1)
+        Write-Host (" [!] Definite zombies: {0} / {1} MB" -f $orphans.Count, $orphanMB) -ForegroundColor Red
+        Write-Host "    → Safe termination:  .\MemoryReset.ps1 -OrphansOnly" -ForegroundColor Yellow
+    } else {
+        Write-Host " [OK] No orphan from dead parent (all claude.exe parents IDE alive)" -ForegroundColor Green
+        Write-Host "      → If more claude.exe than active sessions, excess inside IDE:" -ForegroundColor DarkGray
+        Write-Host '        .\MemoryReset.ps1 -Interactive          (select PID to terminate)'         -ForegroundColor DarkGray
+        Write-Host '        .\MemoryReset.ps1 -KeepPids "PID1,PID2" (specify PID to preserve)'      -ForegroundColor DarkGray
+    }
+}
+
+# ════════════════════════════════════════════════════════════════════
 # 6.5. -Diagnose: Show detailed memory distribution before recovery
 # ════════════════════════════════════════════════════════════════════
 function Show-MemoryDiagnostics {
@@ -570,13 +749,16 @@ function Show-MemoryDiagnostics {
     # 4. Count of processes to terminate (actual recoverable amount preview)
     Write-Host ""
     Write-Host "── Target processes to terminate (Claude/Antigravity) ──" -ForegroundColor Cyan
-    $targets = Get-TargetProcesses
+    $targets = @(Get-TargetProcesses)   # v1.3 safety: prevent pipeline unwrap
     if ($targets.Count -eq 0) {
         Write-Host " (none)" -ForegroundColor DarkGray
     } else {
         $tWS = [math]::Round((($targets | Measure-Object WorkingSetSize -Sum).Sum / 1MB), 1)
         Write-Host (" · Total {0} processes / Working Set total {1:N1} MB recoverable" -f $targets.Count, $tWS)
     }
+
+    # 5. v1.3+: orphan analysis — confirmed orphan(parent death) vs active(parent IDE alive) separation
+    Show-ZombieAnalysis
 
     Write-Host ""
     Write-Host "╔══════════════════════════════════════════════════════════╗" -ForegroundColor Magenta
@@ -859,6 +1041,12 @@ if ($DryRun)   { Write-Host "[i] DRY-RUN mode — no actual termination/recovery
 if ($Diagnose) { Write-Host "[i] DIAGNOSE mode — diagnostics only (read-only)" -ForegroundColor Magenta }
 if ($Deep)     { Write-Host "[i] DEEP mode — Tier A (Memory Compression flush + System WS + network cache) added" -ForegroundColor Magenta }
 if ($IncludeShell) { Write-Host "[!] SHELL restart mode — desktop briefly flickers (Tier B)" -ForegroundColor Yellow }
+# v1.3+
+if ($OrphansOnly)  { Write-Host "[i] ORPHANS-ONLY mode — only claude.exe / node.exe with dead parent IDE" -ForegroundColor Magenta }
+if ($Interactive)  { Write-Host "[i] INTERACTIVE mode — choose PID to preserve before termination" -ForegroundColor Magenta }
+if ($Interactive -and $DryRun) {
+    Write-Host "[!] -DryRun + -Interactive combination — Interactive prompt is ignored in DryRun (no actual termination)" -ForegroundColor Yellow
+}
 
 # Diagnose mode outputs diagnostics only, then exits
 if ($Diagnose) {
@@ -873,9 +1061,16 @@ if ($Diagnose) {
 
 $before = Show-MemoryStatus -Label "Current memory status"
 
+# v1.3: KeepPids parsing (CSV string → [uint32[]])
+$excludePidsArray = ConvertFrom-KeepPidsString -Csv $KeepPids
+if ($excludePidsArray.Count -gt 0) {
+    Write-Host ""
+    Write-Host (" [i] Preserved PID count ({0}): {1}" -f $excludePidsArray.Count, ($excludePidsArray -join ', ')) -ForegroundColor Cyan
+}
+
 Write-Host ""
 Write-Host "── Processes to terminate ──" -ForegroundColor Cyan
-$targets = Get-TargetProcesses
+$targets = @(Get-TargetProcesses -ExcludePids $excludePidsArray -OnlyOrphans:$OrphansOnly)
 if ($targets.Count -eq 0) {
     Write-Host " (No targets — only Standby List cleanup will run)" -ForegroundColor DarkGray
 } else {
@@ -885,6 +1080,7 @@ if ($targets.Count -eq 0) {
         if ($p.ExecutablePath -match '(?i)\\Programs\\Antigravity\\')                              { return 'Antigravity' }
         if ($p.ExecutablePath -match '(?i)\\\.antigravity\\extensions')                            { return 'Claude(Antigravity ext)' }
         if ($p.ExecutablePath -match '(?i)\\\.cursor\\extensions')                                 { return 'Claude(Cursor ext)' }
+        if ($p.ExecutablePath -match '(?i)\\\.vscode\\extensions')                                 { return 'Claude(VS Code ext)' }
         if ($p.ExecutablePath -match '(?i)\\npm\\node_modules\\@anthropic-ai\\claude-code')        { return 'Claude(npm global)' }
         if ($p.ExecutablePath -match '(?i)\\Claude\\claude-code\\')                                { return 'Claude(standalone)' }
         if ($p.Name -eq 'node.exe')                                                                { return 'Claude(node)' }
@@ -923,6 +1119,24 @@ if ($targets.Count -eq 0) {
         $dCount = @($desktopApp).Count
         $dMB = [math]::Round((($desktopApp | Measure-Object WorkingSetSize -Sum).Sum / 1MB), 1)
         Write-Host (" ── Preserved (not terminated): Claude Desktop app {0} / {1:N1} MB" -f $dCount, $dMB) -ForegroundColor Green
+    }
+}
+
+# v1.3: Interactive mode — select preserved PID before termination (-SkipConfirmation ignored — user input is key)
+if ($Interactive -and -not $DryRun -and $targets.Count -gt 0) {
+    Write-Host ""
+    Write-Host "── [Interactive] Select PID to preserve ──" -ForegroundColor Cyan
+    Write-Host "  Enter PID to keep from the list above, separated by commas. Empty input = terminate all (default)" -ForegroundColor DarkGray
+    $userInput = Read-Host "  PID to preserve (example: 1234,5678)"
+    $keepInteractive = ConvertFrom-KeepPidsString -Csv $userInput
+    if ($keepInteractive.Count -gt 0) {
+        $targets = @($targets | Where-Object { $keepInteractive -notcontains $_.ProcessId })
+        Write-Host (" [i] Preserved: {0} PID — remaining termination targets: {1}" -f $keepInteractive.Count, $targets.Count) -ForegroundColor Green
+        if ($targets.Count -eq 0) {
+            Write-Host " [i] No processes to terminate. Only Standby List cleanup proceeds." -ForegroundColor DarkGray
+        }
+    } else {
+        Write-Host " [i] No preserved PID — terminate all." -ForegroundColor DarkGray
     }
 }
 
