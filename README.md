@@ -220,6 +220,18 @@ Run-IdleCleanup.bat           :: 실제 종료 + 메모리 회수
 >
 > `-TrackActivity` 는 read-only(CPU 조회 + 알림)라 **관리자 권한 없이 무인 실행**됩니다. `-IdleOnly` 정리는 종료+회수를 위해 UAC 승격합니다.
 
+### 원클릭 전체 청소 (부산물 포함) [v1.4.1+]
+
+```cmd
+Run-PurgeAll.bat              :: 모든 claude/Antigravity + 자손 부산물 종료 + standby purge
+```
+
+`-IncludeDescendants` 는 종료 대상 claude/Antigravity 의 **자손 프로세스 트리**(세션이 띄운 `conhost`·`bash`·`node`·`pwsh`·`python`·`cmd` 등 부산물)를 함께 종료합니다. `Run-PurgeAll.bat` 은 여기에 깊은 회수(`-Deep`: working set + file cache + Memory Compression flush + standby purge)를 더해 **재부팅에 가까운 청소**를 한 번에 수행합니다.
+
+> 사용자가 직접 띄운 셸은 claude 자손이 아니므로 **건드리지 않습니다**. 특정 세션을 살리려면 `-Interactive` 또는 `-KeepPids "PID"` 와 함께 쓰면 보존된 세션의 자손까지 자동 제외됩니다(보존 claude 는 트리 root 가 아니므로).
+>
+> ⚠ `Run-PurgeAll.bat` 단독 실행은 **작업 중인 claude 세션도 모두 종료**합니다 — 종료 전 Y/n 확인이 표시됩니다.
+
 ### 향후 개선 (Roadmap)
 
 - [ ] 트레이 아이콘 커스텀 디자인 (현재는 Windows 기본 아이콘)

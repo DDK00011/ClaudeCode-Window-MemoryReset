@@ -92,7 +92,8 @@ param(
 
     # v1.4 추가 ─────────────────────────────────────────────
     [switch]$TrackActivity,  # 백그라운드 추적 1-tick: CPU 스냅샷 기록 + 임계초과 시 텔레그램 알림. 종료 안 함, UAC 불필요.
-    [switch]$IdleOnly        # idle(idleMinutes+ 무활동) / orphan 프로세스만 정리 대상 (활성 세션 보존)
+    [switch]$IdleOnly,       # idle(idleMinutes+ 무활동) / orphan 프로세스만 정리 대상 (활성 세션 보존)
+    [switch]$IncludeDescendants  # 종료 대상 claude/Antigravity 의 자손 트리(conhost/bash/node/pwsh/python 등 부산물)도 함께 종료
 )
 
 $ErrorActionPreference = 'Continue'
@@ -139,6 +140,7 @@ if (-not (Test-IsAdmin) -and -not $TrackActivity) {
     if ($Interactive)       { $argList += '-Interactive' }
     if ($OrphansOnly)       { $argList += '-OrphansOnly' }
     if ($IdleOnly)          { $argList += '-IdleOnly' }
+    if ($IncludeDescendants){ $argList += '-IncludeDescendants' }
     if ($KeepPids)          { $argList += @('-KeepPids', "`"$KeepPids`"") }
     if ($PSBoundParameters.ContainsKey('GracefulTimeoutSec')) {
         $argList += @('-GracefulTimeoutSec', $GracefulTimeoutSec)
@@ -390,13 +392,45 @@ function ConvertFrom-KeepPidsString {
 #    핵심 안전장치: Claude Desktop 앱은 절대 매칭 금지 (다중 설치 경로 블랙리스트).
 #    오직 CLI / Antigravity 확장 / 표준 Node 패키지만 종료 대상.
 #    v1.3: -ExcludePids 로 보존, -OnlyOrphans 로 좀비만 선별.
+#    v1.4: -IncludeDescendants 로 종료 대상의 자손 트리(claude 가 띄운 부산물)까지 포함.
 # ════════════════════════════════════════════════════════════════════
+function Get-DescendantPids {
+    # RootPids 의 모든 자손 PID 를 BFS 로 수집 (프로세스 트리 walk). 스냅샷($AllProcs) 기준.
+    # claude/Antigravity 가 spawn 한 conhost/bash/node/pwsh/python 등 "부산물"을 식별하는 데 사용.
+    param([int[]]$RootPids, $AllProcs)
+    $childMap = @{}
+    foreach ($pr in $AllProcs) {
+        $pp = [int]$pr.ParentProcessId
+        if (-not $childMap.ContainsKey($pp)) { $childMap[$pp] = [System.Collections.Generic.List[int]]::new() }
+        $childMap[$pp].Add([int]$pr.ProcessId)
+    }
+    $result = [System.Collections.Generic.List[int]]::new()
+    $seen   = @{}
+    $queue  = [System.Collections.Queue]::new()
+    foreach ($r in $RootPids) { $queue.Enqueue([int]$r) }
+    while ($queue.Count -gt 0) {
+        $cur = [int]$queue.Dequeue()
+        if ($childMap.ContainsKey($cur)) {
+            foreach ($c in $childMap[$cur]) {
+                if (-not $seen.ContainsKey($c)) {
+                    $seen[$c] = $true
+                    $result.Add($c)
+                    $queue.Enqueue($c)
+                }
+            }
+        }
+    }
+    # 호출측이 @() 로 감싸므로 단순 배열 반환 (,@() 이중 wrap 금지)
+    return $result.ToArray()
+}
+
 function Get-TargetProcesses {
     # reason: 화이트리스트 매칭 + 블랙리스트 + filter 통합 — 30줄 초과 불가피.
     # 분리 시 매칭 규칙이 2곳에 흩어져 유지보수 비용 ↑.
     param(
         [uint32[]]$ExcludePids = @(),
-        [switch]$OnlyOrphans
+        [switch]$OnlyOrphans,
+        [switch]$IncludeDescendants
     )
     $allProcs = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue
 
@@ -472,6 +506,24 @@ function Get-TargetProcesses {
     if ($OnlyOrphans) {
         $merged = $merged | Where-Object {
             $_.Name -match '(?i)^(claude|node)\.exe$' -and (Test-IsClaudeOrphan -ClaudeProc $_ -AllProcs $allProcs)
+        }
+    }
+
+    # v1.4: -IncludeDescendants — 종료 대상의 자손 트리(claude 가 spawn 한 conhost/bash/node/pwsh/python 등)를 추가.
+    # self / ExcludePids 제외. KeepPids 로 보존된 claude 는 이미 $merged 에서 빠졌으므로 그 자손도 root 가 아니어서 자동 보존됨.
+    if ($IncludeDescendants) {
+        $merged = @($merged)
+        if ($merged.Count -gt 0) {
+            $rootPids = @($merged | ForEach-Object { [int]$_.ProcessId })
+            $descPids = @(Get-DescendantPids -RootPids $rootPids -AllProcs $allProcs)
+            if ($descPids.Count -gt 0) {
+                $descProcs = $allProcs | Where-Object {
+                    ($descPids -contains [int]$_.ProcessId) -and
+                    ([int]$_.ProcessId -ne $self) -and
+                    ($ExcludePids.Count -eq 0 -or $ExcludePids -notcontains $_.ProcessId)
+                }
+                $merged = @($merged) + @($descProcs) | Sort-Object ProcessId -Unique
+            }
         }
     }
 
@@ -1424,7 +1476,8 @@ if ($excludePidsArray.Count -gt 0) {
 
 Write-Host ""
 Write-Host "── 종료 대상 프로세스 ──" -ForegroundColor Cyan
-$targets = @(Get-TargetProcesses -ExcludePids $excludePidsArray -OnlyOrphans:$OrphansOnly)
+if ($IncludeDescendants) { Write-Host "[i] INCLUDE-DESCENDANTS 모드 — claude/Antigravity 자손 트리(conhost/bash/node/pwsh/python 부산물)도 함께 종료" -ForegroundColor Magenta }
+$targets = @(Get-TargetProcesses -ExcludePids $excludePidsArray -OnlyOrphans:$OrphansOnly -IncludeDescendants:$IncludeDescendants)
 
 # v1.4: -IdleOnly — 추적 기반 idle(idleMinutes+ 무활동) / orphan 후보로만 종료 대상 한정.
 #       활성 세션은 idleMinutes 안에 CPU 를 쓰므로 후보에서 제외됨 → 활성 보존.

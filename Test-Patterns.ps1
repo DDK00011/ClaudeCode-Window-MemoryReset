@@ -310,3 +310,31 @@ foreach ($script in @('Track-Schedule.ps1','Track-Register.bat','Track-Unregiste
         Write-Host "[FAIL] 스크립트 누락: $script" -ForegroundColor Red
     }
 }
+
+# ════════════════════════════════════════════════════════════════════
+# v1.4.1 부산물(자손 트리) 정리 smoke test
+# ════════════════════════════════════════════════════════════════════
+Write-Host ""
+Write-Host "== v1.4.1 부산물(자손 트리) 정리 smoke test =="
+
+if ($src -match '(?ms)^function\s+Get-DescendantPids\b') {
+    Write-Host "[PASS] 함수 정의: Get-DescendantPids" -ForegroundColor Green
+} else { Write-Host "[FAIL] Get-DescendantPids 누락" -ForegroundColor Red }
+
+if ($src -match '\[switch\]\$IncludeDescendants\b') {
+    Write-Host "[PASS] 파라미터: -IncludeDescendants" -ForegroundColor Green
+} else { Write-Host "[FAIL] -IncludeDescendants 누락" -ForegroundColor Red }
+
+# Get-DescendantPids 는 flat array 반환이어야 함 (,@() 이중 wrap 금지 — desc 가 단일 int[] 원소가 되는 버그)
+if ($src -match 'return \$result\.ToArray\(\)' -and $src -notmatch 'return ,\$result\.ToArray\(\)') {
+    Write-Host "[PASS] Get-DescendantPids flat array 반환 (이중 wrap 없음)" -ForegroundColor Green
+} else { Write-Host "[WARN] Get-DescendantPids 반환 형태 미확인" -ForegroundColor Yellow }
+
+# IncludeDescendants 시 self / ExcludePids 제외 가드
+if ($src -match 'ProcessId\) -ne \$self' -and $src -match 'ExcludePids -notcontains') {
+    Write-Host "[PASS] 자손 수집 시 self / KeepPids 제외 가드 존재" -ForegroundColor Green
+} else { Write-Host "[WARN] 자손 제외 가드 미확인" -ForegroundColor Yellow }
+
+if (Test-Path (Join-Path $PSScriptRoot 'Run-PurgeAll.bat')) {
+    Write-Host "[PASS] Run-PurgeAll.bat (원클릭 전체 청소) 존재" -ForegroundColor Green
+} else { Write-Host "[FAIL] Run-PurgeAll.bat 누락" -ForegroundColor Red }
