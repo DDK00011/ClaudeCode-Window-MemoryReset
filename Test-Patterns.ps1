@@ -310,3 +310,31 @@ foreach ($script in @('Track-Schedule.ps1','Track-Register.bat','Track-Unregiste
         Write-Host "[FAIL] Script missing: $script" -ForegroundColor Red
     }
 }
+
+# ════════════════════════════════════════════════════════════════════
+# v1.4.1 Byproduct(descendant tree) cleanup smoke test
+# ════════════════════════════════════════════════════════════════════
+Write-Host ""
+Write-Host "== v1.4.1 Byproduct(descendant tree) cleanup smoke test =="
+
+if ($src -match '(?ms)^function\s+Get-DescendantPids\b') {
+    Write-Host "[PASS] Function definition: Get-DescendantPids" -ForegroundColor Green
+} else { Write-Host "[FAIL] Get-DescendantPids missing" -ForegroundColor Red }
+
+if ($src -match '\[switch\]\$IncludeDescendants\b') {
+    Write-Host "[PASS] Parameter: -IncludeDescendants" -ForegroundColor Green
+} else { Write-Host "[FAIL] -IncludeDescendants missing" -ForegroundColor Red }
+
+# Get-DescendantPids must return a flat array (,@() double wrap prohibited — bug where desc becomes a single int[] element)
+if ($src -match 'return \$result\.ToArray\(\)' -and $src -notmatch 'return ,\$result\.ToArray\(\)') {
+    Write-Host "[PASS] Get-DescendantPids returns a flat array (no double wrap)" -ForegroundColor Green
+} else { Write-Host "[WARN] Get-DescendantPids return format not verified" -ForegroundColor Yellow }
+
+# IncludeDescendants guards excluding self / ExcludePids
+if ($src -match 'ProcessId\) -ne \$self' -and $src -match 'ExcludePids -notcontains') {
+    Write-Host "[PASS] Descendant collection has self / KeepPids exclusion guards" -ForegroundColor Green
+} else { Write-Host "[WARN] Descendant exclusion guard not verified" -ForegroundColor Yellow }
+
+if (Test-Path (Join-Path $PSScriptRoot 'Run-PurgeAll.bat')) {
+    Write-Host "[PASS] Run-PurgeAll.bat (one click full cleanup) exists" -ForegroundColor Green
+} else { Write-Host "[FAIL] Run-PurgeAll.bat missing" -ForegroundColor Red }

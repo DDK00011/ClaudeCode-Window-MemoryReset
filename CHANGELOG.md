@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.1] — 2026-06-14
+
+Byproduct cleanup — terminate the descendant process tree of claude/Antigravity (the conhost/bash/node/pwsh/python "leftovers" a session spawns), plus a one-click full purge.
+
+### Added
+- **`-IncludeDescendants`** — when terminating claude/Antigravity, also kills their full descendant process tree (BFS via `Get-DescendantPids`): conhost, bash, node, pwsh, python, cmd, grep, etc. that the session spawned. `self` and `-KeepPids` are excluded — and because a preserved (KeepPids) claude is not a root, its whole subtree is preserved automatically.
+- **`Run-PurgeAll.bat`** — one-click `-Deep -IncludeDescendants`: kills all claude/Antigravity + descendant byproducts and runs deep recovery (working set + file cache + Memory Compression flush + standby purge) for a near-reboot feel. Confirmation prompt retained (it terminates active sessions too); use `-Interactive` / `-KeepPids` to spare specific sessions.
+
+### Fixed
+- `Get-DescendantPids` returned `,$result.ToArray()` (double-wrapped — `desc` collapsed to a single `int[]` element, so descendant matching found nothing). Same array-wrap class as the v1.4.0 `Get-ReclaimCandidates` fix. Changed to `return $result.ToArray()`. Verified: 48 descendants resolve to a flat int array (conhost 15 / bash 8 / python 8 / node 4 / pwsh 3 / …).
+
 ## [1.4.0] — 2026-06-14
 
 Activity tracking + idle-based selective cleanup + Telegram alerts — terminate sessions confirmed dead by *inactivity*, not just by a dead parent. Closes the gap v1.3 left for the common "IDE host alive, idle children accumulate" case.

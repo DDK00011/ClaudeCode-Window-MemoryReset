@@ -92,7 +92,8 @@ param(
 
     # v1.4 added ─────────────────────────────────────────────
     [switch]$TrackActivity,  # background tracking 1-tick: record CPU snapshot + Telegram alert if threshold exceeded. Does not terminate, no UAC required.
-    [switch]$IdleOnly        # Only idle(idleMinutes+ inactivity) / orphan processes are cleanup targets (preserve active sessions)
+    [switch]$IdleOnly,       # only idle(idleMinutes+ inactivity) / orphan processes are cleanup targets (preserve active sessions)
+    [switch]$IncludeDescendants  # Also terminate descendant tree (conhost/bash/node/pwsh/python and other byproducts) of target claude/Antigravity
 )
 
 $ErrorActionPreference = 'Continue'
@@ -139,6 +140,7 @@ if (-not (Test-IsAdmin) -and -not $TrackActivity) {
     if ($Interactive)       { $argList += '-Interactive' }
     if ($OrphansOnly)       { $argList += '-OrphansOnly' }
     if ($IdleOnly)          { $argList += '-IdleOnly' }
+    if ($IncludeDescendants){ $argList += '-IncludeDescendants' }
     if ($KeepPids)          { $argList += @('-KeepPids', "`"$KeepPids`"") }
     if ($PSBoundParameters.ContainsKey('GracefulTimeoutSec')) {
         $argList += @('-GracefulTimeoutSec', $GracefulTimeoutSec)
@@ -390,13 +392,45 @@ function ConvertFrom-KeepPidsString {
 #    Core safety guard: never match Claude Desktop app (blacklist for multiple install paths).
 #    Only CLI / Antigravity extensions / standard Node packages are termination targets.
 #    v1.3: preserve with -ExcludePids, select only orphans with -OnlyOrphans.
+#    v1.4: include descendant tree (byproducts spawned by claude) in termination targets with -IncludeDescendants.
 # ════════════════════════════════════════════════════════════════════
+function Get-DescendantPids {
+    # Collect all descendant PIDs of RootPids with BFS (process tree walk). Based on snapshot($AllProcs).
+    # Used to identify "byproducts" such as conhost/bash/node/pwsh/python spawned by claude/Antigravity.
+    param([int[]]$RootPids, $AllProcs)
+    $childMap = @{}
+    foreach ($pr in $AllProcs) {
+        $pp = [int]$pr.ParentProcessId
+        if (-not $childMap.ContainsKey($pp)) { $childMap[$pp] = [System.Collections.Generic.List[int]]::new() }
+        $childMap[$pp].Add([int]$pr.ProcessId)
+    }
+    $result = [System.Collections.Generic.List[int]]::new()
+    $seen   = @{}
+    $queue  = [System.Collections.Queue]::new()
+    foreach ($r in $RootPids) { $queue.Enqueue([int]$r) }
+    while ($queue.Count -gt 0) {
+        $cur = [int]$queue.Dequeue()
+        if ($childMap.ContainsKey($cur)) {
+            foreach ($c in $childMap[$cur]) {
+                if (-not $seen.ContainsKey($c)) {
+                    $seen[$c] = $true
+                    $result.Add($c)
+                    $queue.Enqueue($c)
+                }
+            }
+        }
+    }
+    # Caller wraps with @(), so return plain array (no ,@() double wrap)
+    return $result.ToArray()
+}
+
 function Get-TargetProcesses {
     # reason: whitelist matching + blacklist + integrated filter — over 30 lines unavoidable.
     # Splitting scatters matching rules across 2 places, increasing maintenance cost ↑.
     param(
         [uint32[]]$ExcludePids = @(),
-        [switch]$OnlyOrphans
+        [switch]$OnlyOrphans,
+        [switch]$IncludeDescendants
     )
     $allProcs = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue
 
@@ -472,6 +506,24 @@ function Get-TargetProcesses {
     if ($OnlyOrphans) {
         $merged = $merged | Where-Object {
             $_.Name -match '(?i)^(claude|node)\.exe$' -and (Test-IsClaudeOrphan -ClaudeProc $_ -AllProcs $allProcs)
+        }
+    }
+
+    # v1.4: -IncludeDescendants — add descendant tree (conhost/bash/node/pwsh/python and similar byproducts spawned by claude) to termination targets.
+    # self / ExcludePids excluded. claude preserved by KeepPids is already removed from $merged, so descendants are also automatically preserved because not roots.
+    if ($IncludeDescendants) {
+        $merged = @($merged)
+        if ($merged.Count -gt 0) {
+            $rootPids = @($merged | ForEach-Object { [int]$_.ProcessId })
+            $descPids = @(Get-DescendantPids -RootPids $rootPids -AllProcs $allProcs)
+            if ($descPids.Count -gt 0) {
+                $descProcs = $allProcs | Where-Object {
+                    ($descPids -contains [int]$_.ProcessId) -and
+                    ([int]$_.ProcessId -ne $self) -and
+                    ($ExcludePids.Count -eq 0 -or $ExcludePids -notcontains $_.ProcessId)
+                }
+                $merged = @($merged) + @($descProcs) | Sort-Object ProcessId -Unique
+            }
         }
     }
 
@@ -1424,7 +1476,8 @@ if ($excludePidsArray.Count -gt 0) {
 
 Write-Host ""
 Write-Host "── Processes to terminate ──" -ForegroundColor Cyan
-$targets = @(Get-TargetProcesses -ExcludePids $excludePidsArray -OnlyOrphans:$OrphansOnly)
+if ($IncludeDescendants) { Write-Host "[i] INCLUDE-DESCENDANTS mode — also terminate descendant tree (conhost/bash/node/pwsh/python byproducts) of claude/Antigravity" -ForegroundColor Magenta }
+$targets = @(Get-TargetProcesses -ExcludePids $excludePidsArray -OnlyOrphans:$OrphansOnly -IncludeDescendants:$IncludeDescendants)
 
 # v1.4: -IdleOnly — only tracking based idle(idleMinutes+ inactivity) / orphan candidates are termination targets.
 #       Active sessions use CPU within idleMinutes, so excluded from candidates → active preserved.

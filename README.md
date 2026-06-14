@@ -215,6 +215,18 @@ Run-IdleCleanup.bat           :: Actual termination + memory recovery
 >
 > `-TrackActivity` runs unattended **without administrator privileges** because it is read-only(CPU query + alerts). `-IdleOnly` cleanup elevates via UAC for termination+recovery.
 
+## One-click full cleanup (including byproducts) [v1.4.1+]
+
+```cmd
+Run-PurgeAll.bat              :: terminate all claude/Antigravity + descendant byproducts + standby purge
+```
+
+`-IncludeDescendants` also terminates the **descendant process tree**(byproducts such as `conhost`·`bash`·`node`·`pwsh`·`python`·`cmd` launched by the session) of target claude/Antigravity processes. `Run-PurgeAll.bat` adds deep recovery(`-Deep`: working set + file cache + Memory Compression flush + standby purge) to perform **cleanup close to a reboot** at once.
+
+> Shells launched directly by the user are not claude descendants, so they are **not touched**. To preserve a specific session, use with `-Interactive` or `-KeepPids "PID"`, and descendants of preserved sessions are automatically excluded (because preserved claude is not the tree root).
+>
+> ⚠ Running `Run-PurgeAll.bat` alone **terminates all active claude sessions too** — a Y/n confirmation appears before termination.
+
 ## Future improvements (Roadmap)
 
 - [ ] Custom system tray icon design (currently Windows default icon)
