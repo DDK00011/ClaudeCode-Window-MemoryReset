@@ -179,6 +179,42 @@ Automatically recorded in `recovery-history.csv` on every recovery run:
 
 Open from the system tray menu → "View recovery history" in Excel/Notepad. You can make a data-based decision on which mode is most effective on your system.
 
+## Activity tracking + idle cleanup [v1.4+]
+
+**Problem**: `-OrphansOnly` catches only orphan processes whose parent IDE has died, but on Windows it is more common for **idle `claude.exe` processes to accumulate while the IDE extension host remains alive** (children do not cascade-terminate even after closing the window/tab). v1.4 safely recovers them based on **"unused time"**.
+
+**Key safety principle**: even active claude sessions have CPU 0% while waiting for input. So killing based only on "CPU is low now" kills active sessions. v1.4 **accumulates activity history over time**, cleaning up only those with **continuous inactivity** of `idleMinutes` — active sessions are preserved because they must use CPU during that period.
+
+**1) Register background tracking** (default 5-minute interval, records CPU snapshots only — never terminates):
+
+```cmd
+Track-Register.bat            :: Register -TrackActivity in Task Scheduler (UAC elevation)
+Track-Unregister.bat          :: Unregister
+```
+
+**2) Telegram alert when threshold is exceeded**: When the bot token/chat_id is added to `tracker-settings.json`, you receive a Telegram alert when idle/orphan processes exceed a threshold (count/memory/RAM%). **It only sends alerts and does not terminate processes** (prevents work loss).
+
+**3) Manual cleanup after receiving an alert**:
+
+```cmd
+Run-IdleDryRun.bat            :: Preview idle/orphan cleanup targets (no termination)
+Run-IdleCleanup.bat           :: Actual termination + memory recovery
+```
+
+| Settings (`tracker-settings.json`) | Meaning | Default |
+|---|---|---|
+| `idleMinutes` | Mark as idle if continuously inactive for this time (minutes) + below CPU rate | `60` |
+| `cpuThresholdPct` | Minimum CPU rate(%) considered activity | `0.5` |
+| `trackIntervalMin` | Tracking(snapshot) interval(minutes) | `5` |
+| `alert.idleCountThreshold` | Alert if idle/orphan count ≥ this value | `10` |
+| `alert.idleMemMBThreshold` | Alert if total idle/orphan memory(MB) ≥ this value | `4096` |
+| `alert.ramPctThreshold` | Alert if idle/orphan use ≥ this % of total RAM | `10` |
+| `alert.cooldownMin` | Minimum re-alert interval(minutes) | `30` |
+
+> **Security**: `tracker-settings.json` is blocked from commits via `.gitignore` because it contains the bot token. Copy and fill out the template `tracker-settings.example.json`. Do not hardcode tokens in source/CLI.
+>
+> `-TrackActivity` runs unattended **without administrator privileges** because it is read-only(CPU query + alerts). `-IdleOnly` cleanup elevates via UAC for termination+recovery.
+
 ## Future improvements (Roadmap)
 
 - [ ] Custom system tray icon design (currently Windows default icon)

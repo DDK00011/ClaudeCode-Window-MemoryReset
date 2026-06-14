@@ -1,9 +1,22 @@
-﻿# ── Personal data / runtime state (never commit) ──
-*.csv                      # recovery history (all CSV files including recovery-history.csv)
-tray-settings.json         # user threshold/polling settings
-tray-state.json            # runtime state such as last alert time
-recovery-history.*         # all backup/rollover variants
-*.log                      # all logs including system tray daemon debug logs
+# ── Personal data / runtime state (never commit) ──
+# git does not support inline comments(`pattern   # comment`) → comments must be on separate lines.
+
+# Recovery history (all CSV files including recovery-history.csv)
+*.csv
+# All backup/rollover variants (including recovery-history.csv.bak)
+recovery-history.*
+# User threshold/polling settings
+tray-settings.json
+# Runtime state including last alert time
+tray-state.json
+# Tracking/alert settings + Telegram bot token (secret — never commit)
+tracker-settings.json
+# Process CPU activity snapshot (runtime state)
+activity-state.json
+# Last alert time/cooldown (runtime state)
+tracker-state.json
+# All logs including tray / tracker daemon debug logs
+*.log
 
 # Backups
 *.txt.bak

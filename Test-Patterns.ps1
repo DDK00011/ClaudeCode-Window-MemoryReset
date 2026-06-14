@@ -230,3 +230,83 @@ if ($src -match 'recovery-history-fallback-' -and $src -match 'recovery-history-
 } else {
     Write-Host "[WARN] CSV fallback collision prevention not verified" -ForegroundColor Yellow
 }
+
+# ════════════════════════════════════════════════════════════════════
+# v1.4 activity tracking / idle classification / Telegram alert smoke test
+# ════════════════════════════════════════════════════════════════════
+Write-Host ""
+Write-Host "== v1.4 activity tracking / idle classification / Telegram smoke test =="
+
+# 15. New function definitions exist
+$v14fn = @('Update-ActivityState','Test-ProcessIdle','Get-ReclaimCandidates','Send-TelegramMessage','Invoke-ActivityTracking','Get-TrackerSettings','ConvertTo-HashtableDeep')
+foreach ($fn in $v14fn) {
+    if ($src -match "(?ms)^function\s+$fn\b") {
+        Write-Host "[PASS] Function definition: $fn" -ForegroundColor Green
+    } else {
+        Write-Host "[FAIL] Function missing: $fn" -ForegroundColor Red
+    }
+}
+
+# 16. New parameter declarations
+foreach ($p in @('TrackActivity','IdleOnly')) {
+    if ($src -match ('\[switch\]\$' + $p + '\b')) {
+        Write-Host "[PASS] Parameter: -$p" -ForegroundColor Green
+    } else {
+        Write-Host "[FAIL] Parameter missing: -$p" -ForegroundColor Red
+    }
+}
+
+# 17. -TrackActivity excludes UAC elevation (prevents UAC popups during unattended 5 minute runs)
+if ($src -match '-not\s+\(Test-IsAdmin\)\s+-and\s+-not\s+\$TrackActivity') {
+    Write-Host "[PASS] -TrackActivity excluded from UAC elevation (safe for unattended runs)" -ForegroundColor Green
+} else {
+    Write-Host "[FAIL] -TrackActivity triggers UAC elevation — popup risk every 5 minutes in Task Scheduler" -ForegroundColor Red
+}
+
+# 18. [Security] Do not hardcode Telegram bot tokens — must load only from the settings file
+if ($src -match '\d{8,}:[A-Za-z0-9_-]{30,}') {
+    Write-Host "[FAIL] Bot token pattern found in source — secret hardcoding risk!" -ForegroundColor Red
+} else {
+    Write-Host "[PASS] No hardcoded bot token in source (loaded only from tracker-settings.json)" -ForegroundColor Green
+}
+
+# 19. [Safety] 3 guard fields for idle classification (sufficient observation firstTrackedAt + inactivity lastActiveAt + CPU rate lastCpuRatePct)
+if ($src -match 'firstTrackedAt' -and $src -match 'lastActiveAt' -and $src -match 'lastCpuRatePct') {
+    Write-Host "[PASS] 3 guard fields for idle classification exist (sufficient observation/inactivity/CPU rate)" -ForegroundColor Green
+} else {
+    Write-Host "[WARN] idle classification guard fields not verified" -ForegroundColor Yellow
+}
+
+# 20. PID reuse protection — distinguish new/same process by comparing creationDate
+if ($src -match 'creationDate' -and $src -match 'CreationDate') {
+    Write-Host "[PASS] PID reuse protection (check creationDate match)" -ForegroundColor Green
+} else {
+    Write-Host "[WARN] PID reuse protection not verified" -ForegroundColor Yellow
+}
+
+# 21. .gitignore precisely protects tracker-settings.json(tokens) without inline comments
+$giPath = Join-Path $PSScriptRoot '.gitignore'
+if (Test-Path $giPath) {
+    $giFix = Get-Content $giPath -Raw
+    if ($giFix -match '(?m)^tracker-settings\.json\s*$') {
+        Write-Host "[PASS] .gitignore precisely protects tracker-settings.json (no inline comments)" -ForegroundColor Green
+    } else {
+        Write-Host "[FAIL] tracker-settings.json token file unprotected — commit risk!" -ForegroundColor Red
+    }
+}
+
+# 22. example template exists (for commits without tokens)
+if (Test-Path (Join-Path $PSScriptRoot 'tracker-settings.example.json')) {
+    Write-Host "[PASS] tracker-settings.example.json template exists" -ForegroundColor Green
+} else {
+    Write-Host "[WARN] example template missing" -ForegroundColor Yellow
+}
+
+# 23. Task Scheduler/launcher scripts exist
+foreach ($script in @('Track-Schedule.ps1','Track-Register.bat','Track-Unregister.bat','Run-IdleDryRun.bat','Run-IdleCleanup.bat')) {
+    if (Test-Path (Join-Path $PSScriptRoot $script)) {
+        Write-Host "[PASS] Script exists: $script" -ForegroundColor Green
+    } else {
+        Write-Host "[FAIL] Script missing: $script" -ForegroundColor Red
+    }
+}
