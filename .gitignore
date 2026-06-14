@@ -1,9 +1,22 @@
-﻿# ── Personal data / runtime state (never commit) ──
-*.csv                      # 회수 이력 (recovery-history.csv 등 모든 CSV)
-tray-settings.json         # 사용자 임계치/폴링 설정
-tray-state.json            # 마지막 알림 시각 등 런타임 상태
-recovery-history.*         # 백업/롤오버 변형 모두
-*.log                      # tray 데몬 디버그 로그 등 모든 로그
+# ── Personal data / runtime state (never commit) ──
+# git 은 인라인 주석(`pattern   # comment`)을 지원하지 않음 → 주석은 반드시 별도 줄로.
+
+# 회수 이력 (recovery-history.csv 등 모든 CSV)
+*.csv
+# 백업/롤오버 변형 모두 (recovery-history.csv.bak 등)
+recovery-history.*
+# 사용자 임계치/폴링 설정
+tray-settings.json
+# 마지막 알림 시각 등 런타임 상태
+tray-state.json
+# 추적/알림 설정 + 텔레그램 봇 토큰 (시크릿 — 절대 커밋 금지)
+tracker-settings.json
+# 프로세스 CPU 활동 스냅샷 (런타임 상태)
+activity-state.json
+# 마지막 알림 시각/쿨다운 (런타임 상태)
+tracker-state.json
+# tray / tracker 데몬 디버그 로그 등 모든 로그
+*.log
 
 # Backups
 *.txt.bak

@@ -88,7 +88,11 @@ param(
     # PowerShell auto-binds both "1234,5678" and 1234,5678 syntax → string is most robust.
     [string]$KeepPids = '',  # 종료 대상에서 제외할 PID (콤마 구분). 예: -KeepPids "1234,5678"
     [switch]$Interactive,    # 종료 전 PID 별 선택 프롬프트 (보존할 것 선택)
-    [switch]$OrphansOnly     # IDE extension host 가 죽은 claude.exe 만 대상 (안전 모드)
+    [switch]$OrphansOnly,    # IDE extension host 가 죽은 claude.exe 만 대상 (안전 모드)
+
+    # v1.4 추가 ─────────────────────────────────────────────
+    [switch]$TrackActivity,  # 백그라운드 추적 1-tick: CPU 스냅샷 기록 + 임계초과 시 텔레그램 알림. 종료 안 함, UAC 불필요.
+    [switch]$IdleOnly        # idle(idleMinutes+ 무활동) / orphan 프로세스만 정리 대상 (활성 세션 보존)
 )
 
 $ErrorActionPreference = 'Continue'
@@ -116,7 +120,9 @@ function Test-IsAdmin {
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
-if (-not (Test-IsAdmin)) {
+if (-not (Test-IsAdmin) -and -not $TrackActivity) {
+    # v1.4: -TrackActivity 는 read-only(CPU 스냅샷) + 알림만 → admin 불필요. 스케줄러가 5분마다
+    #       무인 실행하므로 UAC 팝업이 뜨면 안 됨. 이 경우 승격을 건너뛰고 그대로 추적 수행.
     # v1.1.2: 사용자 요청에 따라 UAC 항상 강제 (DryRun / Diagnose 도 admin 권한 사용)
     # 이유:
     #   - Diagnose 가 "Memory Compression" 프로세스 enumerate / 다른 사용자 프로세스 조회 가능
@@ -132,6 +138,7 @@ if (-not (Test-IsAdmin)) {
     if ($Diagnose)          { $argList += '-Diagnose' }
     if ($Interactive)       { $argList += '-Interactive' }
     if ($OrphansOnly)       { $argList += '-OrphansOnly' }
+    if ($IdleOnly)          { $argList += '-IdleOnly' }
     if ($KeepPids)          { $argList += @('-KeepPids', "`"$KeepPids`"") }
     if ($PSBoundParameters.ContainsKey('GracefulTimeoutSec')) {
         $argList += @('-GracefulTimeoutSec', $GracefulTimeoutSec)
@@ -1024,12 +1031,359 @@ function Write-RecoveryLog {
 }
 
 # ════════════════════════════════════════════════════════════════════
+# 7-Z. [v1.4.0] 활동 추적 + idle 판정 + 텔레그램 알림
+#   백그라운드 추적(-TrackActivity): 타겟 프로세스의 CPU 스냅샷을 주기적으로 기록하여
+#   "N분 연속 무활동"을 안전하게 판정. 활성 세션은 idleMinutes 안에 반드시 CPU 를 쓰므로
+#   오탐(활성 세션 종료) 없이 버려진 세션만 식별. 이 모드는 절대 프로세스를 죽이지 않음 —
+#   임계 초과 시 텔레그램으로 알림만 보내고, 실제 정리(kill)는 사용자가 수동 실행.
+# ════════════════════════════════════════════════════════════════════
+function Write-TrackerLog {
+    param([string]$Message)
+    try {
+        $line = "[{0}] {1}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Message
+        Add-Content -Path (Join-Path $PSScriptRoot 'tracker.log') -Value $line -Encoding UTF8 -ErrorAction Stop
+    } catch {
+        # 로그 기록 실패는 의도적으로 무시 — 로깅이 추적/알림 자체를 막아선 안 됨.
+    }
+}
+
+function ConvertTo-HashtableDeep {
+    # ConvertFrom-Json (PSCustomObject) → 중첩 hashtable. PS 5.1 은 -AsHashtable 미지원이라 직접 변환.
+    param($InputObject)
+    if ($null -eq $InputObject) { return $null }
+    if ($InputObject -is [System.Collections.IDictionary]) {
+        $h = @{}
+        foreach ($k in @($InputObject.Keys)) { $h[[string]$k] = ConvertTo-HashtableDeep $InputObject[$k] }
+        return $h
+    }
+    if ($InputObject -is [System.Management.Automation.PSCustomObject]) {
+        $h = @{}
+        foreach ($p in $InputObject.PSObject.Properties) { $h[$p.Name] = ConvertTo-HashtableDeep $p.Value }
+        return $h
+    }
+    if ($InputObject -is [object[]]) {
+        return ,@($InputObject | ForEach-Object { ConvertTo-HashtableDeep $_ })
+    }
+    return $InputObject
+}
+
+function ConvertTo-DateTimeSafe {
+    param([string]$Text)
+    if (-not $Text) { return $null }
+    try {
+        return [datetime]::Parse($Text, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind)
+    } catch { return $null }
+}
+
+function Merge-DefaultSettings {
+    # $Target 에 없거나 null 인 키를 $Default 로 채움 (중첩 PSCustomObject 재귀). 설정 파일 누락 키 방어.
+    param($Target, $Default)
+    if ($null -eq $Target) { return $Default }
+    foreach ($p in $Default.PSObject.Properties) {
+        $existing = $Target.PSObject.Properties[$p.Name]
+        if (-not $existing -or $null -eq $existing.Value) {
+            $Target | Add-Member -NotePropertyName $p.Name -NotePropertyValue $p.Value -Force
+        } elseif ($p.Value -is [System.Management.Automation.PSCustomObject]) {
+            $null = Merge-DefaultSettings $Target.$($p.Name) $p.Value
+        }
+    }
+    return $Target
+}
+
+function Get-TrackerSettings {
+    $defaults = [PSCustomObject]@{
+        idleMinutes      = 60
+        cpuThresholdPct  = 0.5
+        trackIntervalMin = 5
+        alert = [PSCustomObject]@{
+            enabled            = $false
+            telegramBotToken   = ''
+            telegramChatId     = ''
+            ramPctThreshold    = 10
+            idleCountThreshold = 10
+            idleMemMBThreshold = 4096
+            cooldownMin        = 30
+        }
+    }
+    $path = Join-Path $PSScriptRoot 'tracker-settings.json'
+    if (-not (Test-Path $path)) { return $defaults }
+    try {
+        $loaded = Get-Content -Path $path -Raw -Encoding UTF8 | ConvertFrom-Json
+        return (Merge-DefaultSettings $loaded $defaults)
+    } catch {
+        Write-TrackerLog "tracker-settings.json 로드 실패 — 기본값 사용: $($_.Exception.Message)"
+        return $defaults
+    }
+}
+
+function Get-ActivityStatePath { Join-Path $PSScriptRoot 'activity-state.json' }
+function Get-TrackerStatePath  { Join-Path $PSScriptRoot 'tracker-state.json' }
+
+function Read-ActivityState {
+    $path = Get-ActivityStatePath
+    if (-not (Test-Path $path)) { return @{ version = 1; updatedAt = ''; processes = @{} } }
+    try {
+        $obj = Get-Content -Path $path -Raw -Encoding UTF8 | ConvertFrom-Json
+        $h = ConvertTo-HashtableDeep $obj
+        if ($null -eq $h)           { $h = @{} }
+        if ($null -eq $h.processes) { $h.processes = @{} }
+        return $h
+    } catch {
+        Write-TrackerLog "activity-state.json 로드 실패 — 새 상태로 시작: $($_.Exception.Message)"
+        return @{ version = 1; updatedAt = ''; processes = @{} }
+    }
+}
+
+function Write-ActivityState {
+    param($State)
+    try {
+        ($State | ConvertTo-Json -Depth 8) | Set-Content -Path (Get-ActivityStatePath) -Encoding UTF8 -ErrorAction Stop
+    } catch {
+        Write-TrackerLog "activity-state.json 저장 실패: $($_.Exception.Message)"
+    }
+}
+
+function Read-TrackerState {
+    $path = Get-TrackerStatePath
+    if (-not (Test-Path $path)) { return @{ lastAlertAt = '' } }
+    try {
+        $obj = Get-Content -Path $path -Raw -Encoding UTF8 | ConvertFrom-Json
+        $h = ConvertTo-HashtableDeep $obj
+        if ($null -eq $h) { $h = @{ lastAlertAt = '' } }
+        return $h
+    } catch { return @{ lastAlertAt = '' } }
+}
+
+function Write-TrackerState {
+    param($State)
+    try {
+        ($State | ConvertTo-Json -Depth 4) | Set-Content -Path (Get-TrackerStatePath) -Encoding UTF8 -ErrorAction Stop
+    } catch { Write-TrackerLog "tracker-state.json 저장 실패: $($_.Exception.Message)" }
+}
+
+function Get-LogicalCoreCount {
+    if (-not $script:nLogicalCores) {
+        try { $script:nLogicalCores = [int](Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).NumberOfLogicalProcessors }
+        catch { $script:nLogicalCores = [Environment]::ProcessorCount }
+        if (-not $script:nLogicalCores -or $script:nLogicalCores -lt 1) { $script:nLogicalCores = 1 }
+    }
+    return $script:nLogicalCores
+}
+
+function Update-ActivityState {
+    # reason: 스냅샷 4분기(신규/기존갱신/PID재사용리셋/소멸제거)를 한 흐름에서 — 분리 시 state 일관성 깨짐.
+    # 각 타겟의 CPU 누적초(Get-Process.CPU) delta 로 직전 간격 CPU 율을 계산, 임계 이상이면 lastActiveAt 갱신.
+    param($Settings)
+    $now    = Get-Date
+    $nowIso = $now.ToString('o')
+    $nCores = Get-LogicalCoreCount
+    $state  = Read-ActivityState
+    if ($null -eq $state.processes) { $state.processes = @{} }
+
+    $targets = @(Get-TargetProcesses)
+    $gp = @{}
+    Get-Process -ErrorAction SilentlyContinue | ForEach-Object { $gp[[int]$_.Id] = $_ }
+
+    $seen = @{}
+    foreach ($t in $targets) {
+        $procId = [int]$t.ProcessId
+        $seen["$procId"] = $true
+        $proc     = $gp[$procId]
+        $cpuSec   = if ($proc -and $null -ne $proc.CPU) { [double]$proc.CPU } else { $null }
+        $creation = if ($t.CreationDate) { ([datetime]$t.CreationDate).ToString('o') } else { '' }
+        $key      = "$procId"
+        $entry    = $state.processes[$key]
+
+        if ($entry -and $entry.creationDate -eq $creation) {
+            # 동일 프로세스(PID+생성시각 일치) — CPU delta 로 활동 여부 판정
+            if ($null -ne $cpuSec -and $null -ne $entry.lastCpuSec) {
+                $lastSeen = ConvertTo-DateTimeSafe $entry.lastSeenAt
+                $dSec = if ($lastSeen) { ($now - $lastSeen).TotalSeconds } else { 0 }
+                if ($dSec -gt 0) {
+                    $dCpu = $cpuSec - [double]$entry.lastCpuSec
+                    if ($dCpu -lt 0) { $dCpu = 0 }
+                    $ratePct = ($dCpu / $dSec / $nCores) * 100
+                    $entry.lastCpuRatePct = [math]::Round($ratePct, 3)
+                    if ($ratePct -ge [double]$Settings.cpuThresholdPct) { $entry.lastActiveAt = $nowIso }
+                }
+            }
+            if ($null -ne $cpuSec) { $entry.lastCpuSec = $cpuSec }
+            $entry.lastSeenAt = $nowIso
+            $entry.name       = [string]$t.Name
+            $entry.wsBytes    = [long]$t.WorkingSetSize
+            $entry.ppid       = [int]$t.ParentProcessId
+            $state.processes[$key] = $entry
+        } else {
+            # 신규 또는 PID 재사용(생성시각 불일치) → 이력 리셋, baseline 등록
+            $state.processes[$key] = @{
+                name           = [string]$t.Name
+                creationDate   = $creation
+                firstTrackedAt = $nowIso
+                lastActiveAt   = $nowIso
+                lastCpuSec     = $cpuSec
+                lastCpuRatePct = $null
+                lastSeenAt     = $nowIso
+                wsBytes        = [long]$t.WorkingSetSize
+                ppid           = [int]$t.ParentProcessId
+            }
+        }
+    }
+
+    # 소멸한 PID 제거 (Remove 중 컬렉션 수정 방지 위해 키 복사)
+    foreach ($k in @($state.processes.Keys)) {
+        if (-not $seen[$k]) { $state.processes.Remove($k) }
+    }
+    $state.updatedAt = $nowIso
+    Write-ActivityState $state
+    return $state
+}
+
+function Test-ProcessIdle {
+    # 안전 판정: (1)추적 시작 후 idleMinutes 경과(관측충분) AND (2)마지막 활동 후 idleMinutes 경과
+    #            AND (3)직전 간격 CPU 율 < 임계. 하나라도 불충족 → 보존(false). 활성 세션 오탐 방지.
+    param($Entry, $Settings, $Now)
+    if (-not $Entry) { return $false }
+    $first  = ConvertTo-DateTimeSafe $Entry.firstTrackedAt
+    $active = ConvertTo-DateTimeSafe $Entry.lastActiveAt
+    if (-not $first -or -not $active) { return $false }
+    $idleMin = [double]$Settings.idleMinutes
+    if (($Now - $first).TotalMinutes  -lt $idleMin) { return $false }   # 관측 부족 → 보존
+    if (($Now - $active).TotalMinutes -lt $idleMin) { return $false }   # 최근 활동 → 보존
+    if ($null -ne $Entry.lastCpuRatePct -and [double]$Entry.lastCpuRatePct -ge [double]$Settings.cpuThresholdPct) { return $false }
+    return $true
+}
+
+function Get-ReclaimCandidates {
+    # idle(추적 기반 1시간+ 무활동) ∪ orphan(부모 IDE 죽음) 후보 목록(PSCustomObject[]).
+    param($Settings)
+    $now      = Get-Date
+    $state    = Read-ActivityState
+    $allProcs = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue
+    $targets  = @(Get-TargetProcesses)
+    $result   = @()
+    foreach ($t in $targets) {
+        $entry    = $state.processes["$([int]$t.ProcessId)"]
+        $isIdle   = Test-ProcessIdle -Entry $entry -Settings $Settings -Now $now
+        $isOrphan = ($t.Name -match '(?i)^(claude|node)\.exe$') -and (Test-IsClaudeOrphan -ClaudeProc $t -AllProcs $allProcs)
+        if ($isIdle -or $isOrphan) {
+            $idleMin = $null
+            if ($entry -and $entry.lastActiveAt) {
+                $a = ConvertTo-DateTimeSafe $entry.lastActiveAt
+                if ($a) { $idleMin = [math]::Round(($now - $a).TotalMinutes, 1) }
+            }
+            $result += [PSCustomObject]@{
+                ProcessId = [int]$t.ProcessId
+                Name      = [string]$t.Name
+                WsMB      = [math]::Round($t.WorkingSetSize / 1MB, 1)
+                IsIdle    = $isIdle
+                IsOrphan  = $isOrphan
+                IdleMin   = $idleMin
+            }
+        }
+    }
+    # 호출측이 항상 @() 로 감싸므로 단순 반환 (,@() 이중 wrap 금지 — 중첩 배열 버그 유발)
+    return $result
+}
+
+function Send-TelegramMessage {
+    param([string]$Token, [string]$ChatId, [string]$Text)
+    if (-not $Token -or -not $ChatId) {
+        Write-TrackerLog "텔레그램 발송 생략 — token 또는 chatId 미설정"
+        return $false
+    }
+    try {
+        [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
+        # JSON + UTF-8 bytes 로 전송 — 해시 -Body 는 PS 5.1 에서 한글/이모지를 ASCII 로 깨뜨림.
+        $json  = @{ chat_id = $ChatId; text = $Text; parse_mode = 'HTML'; disable_web_page_preview = $true } | ConvertTo-Json -Compress
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
+        $null = Invoke-RestMethod -Uri "https://api.telegram.org/bot$Token/sendMessage" -Method Post -Body $bytes -ContentType 'application/json; charset=utf-8' -TimeoutSec 12 -ErrorAction Stop
+        return $true
+    } catch {
+        Write-TrackerLog "텔레그램 발송 실패: $($_.Exception.Message)"
+        return $false
+    }
+}
+
+function Format-AlertMessage {
+    param($Candidates, $MemMB, $RamPct, $Ram)
+    $idleN   = @($Candidates | Where-Object { $_.IsIdle }).Count
+    $orphanN = @($Candidates | Where-Object { $_.IsOrphan }).Count
+    $lines = @()
+    $lines += "🧹 <b>MemoryReset — 정리 후보 누적 알림</b>"
+    $lines += ""
+    $lines += "정리 후보: <b>$($Candidates.Count)개</b> / <b>$MemMB MB</b> (RAM 의 $RamPct%)"
+    $lines += "· idle (idleMinutes+ 무활동, CPU 율&lt;임계): $idleN 개"
+    $lines += "· 고아 (부모 IDE 죽음): $orphanN 개"
+    $lines += "· 현재 가용 RAM: $($Ram.FreeMB) MB ($($Ram.PctFree)%)"
+    $top = @($Candidates | Sort-Object WsMB -Descending | Select-Object -First 5)
+    if ($top.Count -gt 0) {
+        $lines += ""
+        $lines += "<b>상위 점유</b>:"
+        foreach ($p in $top) {
+            $tag = if ($p.IsOrphan) { ' [orphan]' } elseif ($p.IsIdle) { ' [idle]' } else { '' }
+            $lines += "  PID $($p.ProcessId)  $($p.Name)  $($p.WsMB)MB$tag"
+        }
+    }
+    $lines += ""
+    $lines += "미리보기: <code>Run-IdleDryRun.bat</code>"
+    $lines += "수동 정리: <code>Run-IdleCleanup.bat</code>"
+    return ($lines -join "`n")
+}
+
+function Invoke-ActivityTracking {
+    # 백그라운드 추적 1-tick: 스냅샷 갱신 → 정리후보 산출 → 임계 초과 시 텔레그램 알림.
+    # 절대 프로세스를 종료하지 않음(read-only + 알림 전용). 작업 스케줄러가 trackIntervalMin 간격으로 호출.
+    $settings = Get-TrackerSettings
+    $null = Update-ActivityState -Settings $settings
+    $now  = Get-Date
+
+    $candidates = @(Get-ReclaimCandidates -Settings $settings)
+    $count = $candidates.Count
+    $memMB = if ($count -gt 0) { [math]::Round((@($candidates | Measure-Object WsMB -Sum).Sum), 1) } else { 0 }
+    $ram   = Get-MemoryStatus
+    $ramPct = if ($ram.TotalMB -gt 0) { [math]::Round($memMB / $ram.TotalMB * 100, 1) } else { 0 }
+
+    $a = $settings.alert
+    $trigger = ($count -ge [int]$a.idleCountThreshold) -or
+               ($memMB -ge [double]$a.idleMemMBThreshold) -or
+               ($ramPct -ge [double]$a.ramPctThreshold)
+
+    Write-TrackerLog ("tick: candidates={0} memMB={1} ramPct={2}% trigger={3} alertEnabled={4}" -f $count, $memMB, $ramPct, $trigger, $a.enabled)
+
+    if ($a.enabled -and $trigger) {
+        $tstate = Read-TrackerState
+        $lastAlert = ConvertTo-DateTimeSafe $tstate.lastAlertAt
+        $cooled = (-not $lastAlert) -or (($now - $lastAlert).TotalMinutes -ge [double]$a.cooldownMin)
+        if ($cooled) {
+            $msg = Format-AlertMessage -Candidates $candidates -MemMB $memMB -RamPct $ramPct -Ram $ram
+            if (Send-TelegramMessage -Token $a.telegramBotToken -ChatId $a.telegramChatId -Text $msg) {
+                $tstate.lastAlertAt = $now.ToString('o')
+                Write-TrackerState $tstate
+                Write-TrackerLog "텔레그램 알림 발송됨 (candidates=$count)"
+            }
+        } else {
+            Write-TrackerLog "쿨다운 활성 — 알림 생략"
+        }
+    }
+    return $candidates
+}
+
+# ════════════════════════════════════════════════════════════════════
 # 8. Main
 # ════════════════════════════════════════════════════════════════════
 try { $Host.UI.RawUI.WindowTitle = 'Memory Reset — Claude Code & Antigravity' } catch {}
 
 # 실행 시간 측정 시작
 $script:startTime = Get-Date
+
+# v1.4: -TrackActivity — 백그라운드 추적 1-tick (배너/UI 없이, kill 없이). 작업 스케줄러가 주기 호출.
+#       CPU 스냅샷 갱신 → 정리후보 산출 → 임계 초과 시 텔레그램 알림만 보내고 종료.
+if ($TrackActivity) {
+    Write-TrackerLog "=== TrackActivity tick ==="
+    $cand = @(Invoke-ActivityTracking)
+    Write-Host ("[tracker] reclaim candidates = {0}" -f $cand.Count) -ForegroundColor DarkGray
+    exit 0
+}
 
 Clear-Host
 Write-Host "╔══════════════════════════════════════════════════════════╗" -ForegroundColor Cyan
@@ -1071,6 +1425,20 @@ if ($excludePidsArray.Count -gt 0) {
 Write-Host ""
 Write-Host "── 종료 대상 프로세스 ──" -ForegroundColor Cyan
 $targets = @(Get-TargetProcesses -ExcludePids $excludePidsArray -OnlyOrphans:$OrphansOnly)
+
+# v1.4: -IdleOnly — 추적 기반 idle(idleMinutes+ 무활동) / orphan 후보로만 종료 대상 한정.
+#       활성 세션은 idleMinutes 안에 CPU 를 쓰므로 후보에서 제외됨 → 활성 보존.
+if ($IdleOnly) {
+    $idleSettings = Get-TrackerSettings
+    $idleCand = @(Get-ReclaimCandidates -Settings $idleSettings)
+    $idlePids = @($idleCand | ForEach-Object { $_.ProcessId })
+    $targets  = @($targets | Where-Object { $idlePids -contains $_.ProcessId })
+    if ($idleCand.Count -eq 0) {
+        Write-Host " [i] idle/orphan 후보 없음 — 추적 이력이 idleMinutes 이상 누적되어야 판정됩니다." -ForegroundColor DarkGray
+        Write-Host "     (스케줄러로 -TrackActivity 를 돌리고 있는지, 누적 시간이 충분한지 확인하세요.)" -ForegroundColor DarkGray
+    }
+}
+
 if ($targets.Count -eq 0) {
     Write-Host " (대상 없음 — Standby List 정리만 수행됩니다)" -ForegroundColor DarkGray
 } else {

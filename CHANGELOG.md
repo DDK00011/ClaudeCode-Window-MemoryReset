@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] — 2026-06-14
+
+Activity tracking + idle-based selective cleanup + Telegram alerts — terminate sessions confirmed dead by *inactivity*, not just by a dead parent. Closes the gap v1.3 left for the common "IDE host alive, idle children accumulate" case.
+
+### Added — Activity tracking (`-TrackActivity`)
+- Background snapshot mode: records each target process's cumulative CPU time to `activity-state.json` and computes a per-interval CPU rate. While the rate stays below `cpuThresholdPct`, `lastActiveAt` is **not** advanced — making "N minutes of *continuous* inactivity" measurable. Read-only: never terminates anything; only updates state and (optionally) sends a Telegram alert.
+- **UAC-exempt**: `-TrackActivity` skips elevation (`-not (Test-IsAdmin) -and -not $TrackActivity`) so the scheduled task runs unattended without a UAC prompt every interval.
+- Registered via `Track-Register.bat` → `Track-Schedule.ps1` (`Register-ScheduledTask`, interval = `trackIntervalMin`, `RunLevel Limited`, hidden window). Unregister via `Track-Unregister.bat`.
+
+### Added — Idle-based cleanup (`-IdleOnly`)
+- Restricts termination targets to processes that are **idle** (observed ≥ `idleMinutes` AND inactive ≥ `idleMinutes` AND current CPU rate < `cpuThresholdPct`) **OR orphan** (dead parent). Active sessions necessarily use CPU within `idleMinutes`, so they are excluded → preserved.
+- `Run-IdleDryRun.bat` previews candidates; `Run-IdleCleanup.bat` performs the kill + recovery. Kill stays user-triggered.
+- Why: `-OrphansOnly` only catches dead-parent zombies, but on Windows the IDE extension host frequently stays alive while accumulating idle child `claude.exe` (closing a tab does not cascade-kill). v1.4 reclaims those by inactivity.
+
+### Added — Telegram alerts
+- `Send-TelegramMessage` (Bot API `sendMessage`, TLS 1.2, HTML). When reclaim candidates exceed **any** of `idleCountThreshold` / `idleMemMBThreshold` / `ramPctThreshold`, an alert is sent, subject to `cooldownMin`. **Alert only — never auto-kills** (prevents work loss). Token / chat_id live in `tracker-settings.json`; alert is silently skipped if unset.
+
+### Added — Config & runtime state
+- `tracker-settings.json` (git-ignored — holds bot token) + `tracker-settings.example.json` (committed template). Keys: `idleMinutes`, `cpuThresholdPct`, `trackIntervalMin`, `alert.{enabled,telegramBotToken,telegramChatId,ramPctThreshold,idleCountThreshold,idleMemMBThreshold,cooldownMin}`.
+- `activity-state.json` (per-PID CPU snapshots) + `tracker-state.json` (last alert time) — both git-ignored.
+
+### Fixed — Security: `.gitignore` inline comments were inert (P0)
+- The existing `.gitignore` used inline comments (`*.csv   # 주석`), which **git does not support** (only whole-line `#`). Consequence: `*.csv`, `*.log`, `tray-settings.json`, etc. were **never actually ignored** — a real secret-commit risk once `tracker-settings.json` (bot token) was added. Rewrote with comments on their own lines. Verified via `git check-ignore -v` that `tracker-settings.json` is now blocked and not tracked.
+
+### Fixed — JSON round-trip / array bugs (caught during verification)
+- `Get-ReclaimCandidates` returned `,@($result)` (double-wrapped array) → `Measure-Object WsMB` threw "property not found" on the nested element. Changed to `return $result` (callers already wrap with `@()`). Verified: candidates=46 → memMB=18901.5 aggregates correctly.
+- Added `ConvertTo-HashtableDeep` to normalize `ConvertFrom-Json` (PSCustomObject) → nested hashtable (PS 5.1 lacks `-AsHashtable`). Confirmed `firstTrackedAt` persists across save/load runs (no spurious PID-reuse reset).
+
+### Safety
+- **3-layer idle guard**: sufficient observation (tracked ≥ idleMinutes) AND sustained inactivity (≥ idleMinutes) AND low current CPU rate — any one unmet ⇒ preserved. An active session merely waiting for input is never killed on a single low-CPU sample.
+- PID-reuse defense via `creationDate` match (process start time); mismatched start time ⇒ history reset, never reuses another process's idle history.
+- Kill path uses `taskkill /F /T` (tree) so a terminated `claude.exe` does not orphan its `context-mode` MCP `node.exe` children — the exact "orphan runaway" this tool also cleans.
+- `Test-Patterns.ps1`: +21 v1.4 assertions (functions/params present, `-TrackActivity` UAC-exempt, **no hardcoded bot token in source**, idle guard fields, `.gitignore` token protection, launcher scripts). 44/44 pass on PowerShell 5.1.
+
 ## [1.3.0] — 2026-05-23
 
 Selective termination + zombie analysis — preserve active sessions, kill only what is dead or excess.

@@ -1,0 +1,30 @@
+{
+  "_comment": "이 파일을 tracker-settings.json 으로 복사한 뒤 telegramBotToken / telegramChatId 를 채우세요. tracker-settings.json 은 .gitignore 로 커밋되지 않습니다 (토큰 보호).",
+
+  "idleMinutes": 60,
+  "_idleMinutes": "이 시간(분) 이상 연속 무활동 + CPU 임계 미만이면 idle(버려진 세션)로 판정. 활성 세션은 1시간 내 반드시 CPU 를 쓰므로 오탐 방지의 핵심.",
+
+  "cpuThresholdPct": 0.5,
+  "_cpuThresholdPct": "추적 간격 동안 CPU 사용률이 이 % 이상이면 '활동'으로 보고 lastActiveAt 갱신. 미만이면 idle 누적.",
+
+  "trackIntervalMin": 5,
+  "_trackIntervalMin": "백그라운드 추적(스냅샷) 주기(분). 작업 스케줄러 등록 시 이 간격으로 -TrackActivity 실행.",
+
+  "alert": {
+    "enabled": false,
+    "telegramBotToken": "",
+    "telegramChatId": "",
+
+    "ramPctThreshold": 10,
+    "_ramPctThreshold": "idle/고아 프로세스 메모리 합계가 전체 RAM 의 이 % 이상이면 알림 (OR 조건).",
+
+    "idleCountThreshold": 10,
+    "_idleCountThreshold": "idle/고아 프로세스 개수가 이 값 이상이면 알림 (OR 조건).",
+
+    "idleMemMBThreshold": 4096,
+    "_idleMemMBThreshold": "idle/고아 프로세스 메모리 합계 절대값(MB) 임계 (OR 조건).",
+
+    "cooldownMin": 30,
+    "_cooldownMin": "직전 알림 이후 이 시간(분) 안에는 재알림 안 함 (도배 방지)."
+  }
+}

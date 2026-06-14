@@ -184,6 +184,42 @@ Tray-AutoStart-Unregister.bat     :: 자동 시작 해제
 
 트레이 메뉴 → "회수 이력 보기" 로 Excel/메모장에서 열기. 어떤 모드가 본인 시스템에서 효과가 큰지 데이터 기반 판단 가능.
 
+### 활동 추적 + idle 정리 [v1.4+]
+
+**문제**: `-OrphansOnly` 는 부모 IDE 가 죽은 좀비만 잡지만, Windows 에서는 **IDE extension host 가 살아있는 채로 idle `claude.exe` 가 쌓이는** 경우가 더 흔합니다 (창/탭을 닫아도 자식이 cascade 종료되지 않음). v1.4 는 **"미사용 시간"** 기준으로 이들을 안전하게 회수합니다.
+
+**핵심 안전 원리**: claude 활성 세션도 입력 대기 중엔 CPU 0% 입니다. 그래서 "지금 CPU 낮음"만으로 죽이면 활성 세션을 죽입니다. v1.4 는 **활동 이력을 시간에 걸쳐 누적**해서 `idleMinutes` **연속 무활동**인 것만 정리합니다 — 활성 세션은 그 안에 반드시 CPU 를 쓰므로 보존됩니다.
+
+**1) 백그라운드 추적 등록** (기본 5분 간격, CPU 스냅샷만 기록 — 절대 종료 안 함):
+
+```cmd
+Track-Register.bat            :: 작업 스케줄러에 -TrackActivity 등록 (UAC 승격)
+Track-Unregister.bat          :: 해제
+```
+
+**2) 임계 초과 시 텔레그램 알림**: `tracker-settings.json` 에 봇 토큰/chat_id 를 넣으면, idle/orphan 프로세스가 임계(개수/메모리/RAM%)를 넘을 때 텔레그램으로 알림이 옵니다. **알림만 보내고 종료는 하지 않습니다** (작업 손실 방지).
+
+**3) 알림을 받으면 수동 정리**:
+
+```cmd
+Run-IdleDryRun.bat            :: idle/orphan 정리 대상 미리보기 (종료 없음)
+Run-IdleCleanup.bat           :: 실제 종료 + 메모리 회수
+```
+
+| 설정 (`tracker-settings.json`) | 의미 | 기본값 |
+|---|---|---|
+| `idleMinutes` | 이 시간(분) 연속 무활동 + CPU 율 미만이면 idle 판정 | `60` |
+| `cpuThresholdPct` | 활동으로 간주할 CPU 율(%) 하한 | `0.5` |
+| `trackIntervalMin` | 추적(스냅샷) 주기(분) | `5` |
+| `alert.idleCountThreshold` | idle/orphan 개수 ≥ 이 값이면 알림 | `10` |
+| `alert.idleMemMBThreshold` | idle/orphan 메모리합(MB) ≥ 이 값이면 알림 | `4096` |
+| `alert.ramPctThreshold` | idle/orphan 이 전체 RAM 의 ≥ 이 % 면 알림 | `10` |
+| `alert.cooldownMin` | 재알림 최소 간격(분) | `30` |
+
+> **보안**: `tracker-settings.json` 은 봇 토큰을 담으므로 `.gitignore` 로 커밋 차단됩니다. 템플릿은 `tracker-settings.example.json` 을 복사해서 채우세요. 소스/CLI 에는 토큰을 하드코딩하지 않습니다.
+>
+> `-TrackActivity` 는 read-only(CPU 조회 + 알림)라 **관리자 권한 없이 무인 실행**됩니다. `-IdleOnly` 정리는 종료+회수를 위해 UAC 승격합니다.
+
 ### 향후 개선 (Roadmap)
 
 - [ ] 트레이 아이콘 커스텀 디자인 (현재는 Windows 기본 아이콘)

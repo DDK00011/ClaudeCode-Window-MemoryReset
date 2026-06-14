@@ -230,3 +230,83 @@ if ($src -match 'recovery-history-fallback-' -and $src -match 'recovery-history-
 } else {
     Write-Host "[WARN] CSV fallback 충돌 방지 미확인" -ForegroundColor Yellow
 }
+
+# ════════════════════════════════════════════════════════════════════
+# v1.4 활동추적 / idle 판정 / 텔레그램 알림 smoke test
+# ════════════════════════════════════════════════════════════════════
+Write-Host ""
+Write-Host "== v1.4 활동추적 / idle 판정 / 텔레그램 smoke test =="
+
+# 15. 신규 함수 정의 존재
+$v14fn = @('Update-ActivityState','Test-ProcessIdle','Get-ReclaimCandidates','Send-TelegramMessage','Invoke-ActivityTracking','Get-TrackerSettings','ConvertTo-HashtableDeep')
+foreach ($fn in $v14fn) {
+    if ($src -match "(?ms)^function\s+$fn\b") {
+        Write-Host "[PASS] 함수 정의: $fn" -ForegroundColor Green
+    } else {
+        Write-Host "[FAIL] 함수 누락: $fn" -ForegroundColor Red
+    }
+}
+
+# 16. 신규 파라미터 선언
+foreach ($p in @('TrackActivity','IdleOnly')) {
+    if ($src -match ('\[switch\]\$' + $p + '\b')) {
+        Write-Host "[PASS] 파라미터: -$p" -ForegroundColor Green
+    } else {
+        Write-Host "[FAIL] 파라미터 누락: -$p" -ForegroundColor Red
+    }
+}
+
+# 17. -TrackActivity 는 UAC 승격 제외 (무인 5분 실행 시 UAC 팝업 방지)
+if ($src -match '-not\s+\(Test-IsAdmin\)\s+-and\s+-not\s+\$TrackActivity') {
+    Write-Host "[PASS] -TrackActivity UAC 승격 제외 (무인 실행 안전)" -ForegroundColor Green
+} else {
+    Write-Host "[FAIL] -TrackActivity 가 UAC 승격 트리거 — 스케줄러 5분마다 팝업 위험" -ForegroundColor Red
+}
+
+# 18. [보안] 텔레그램 봇 토큰 하드코딩 금지 — 설정 파일에서만 로드되어야 함
+if ($src -match '\d{8,}:[A-Za-z0-9_-]{30,}') {
+    Write-Host "[FAIL] 소스에 봇 토큰 형태 문자열 발견 — 시크릿 하드코딩 위험!" -ForegroundColor Red
+} else {
+    Write-Host "[PASS] 소스에 하드코딩된 봇 토큰 없음 (tracker-settings.json 에서만 로드)" -ForegroundColor Green
+}
+
+# 19. [안전] idle 판정 3중 가드 필드 (관측충분 firstTrackedAt + 무활동 lastActiveAt + CPU율 lastCpuRatePct)
+if ($src -match 'firstTrackedAt' -and $src -match 'lastActiveAt' -and $src -match 'lastCpuRatePct') {
+    Write-Host "[PASS] idle 판정 3중 가드 필드 존재 (관측충분/무활동/CPU율)" -ForegroundColor Green
+} else {
+    Write-Host "[WARN] idle 판정 가드 필드 미확인" -ForegroundColor Yellow
+}
+
+# 20. PID 재사용 방어 — creationDate 비교로 신규/동일 프로세스 구분
+if ($src -match 'creationDate' -and $src -match 'CreationDate') {
+    Write-Host "[PASS] PID 재사용 방어 (creationDate 일치 검사)" -ForegroundColor Green
+} else {
+    Write-Host "[WARN] PID 재사용 방어 미확인" -ForegroundColor Yellow
+}
+
+# 21. .gitignore 가 tracker-settings.json(토큰) 을 인라인 주석 없이 정확히 보호
+$giPath = Join-Path $PSScriptRoot '.gitignore'
+if (Test-Path $giPath) {
+    $giFix = Get-Content $giPath -Raw
+    if ($giFix -match '(?m)^tracker-settings\.json\s*$') {
+        Write-Host "[PASS] .gitignore tracker-settings.json 정확 보호 (인라인 주석 없음)" -ForegroundColor Green
+    } else {
+        Write-Host "[FAIL] tracker-settings.json 토큰 파일 미보호 — 커밋 위험!" -ForegroundColor Red
+    }
+}
+
+# 22. example 템플릿 존재 (토큰 없는 커밋용)
+if (Test-Path (Join-Path $PSScriptRoot 'tracker-settings.example.json')) {
+    Write-Host "[PASS] tracker-settings.example.json 템플릿 존재" -ForegroundColor Green
+} else {
+    Write-Host "[WARN] example 템플릿 누락" -ForegroundColor Yellow
+}
+
+# 23. 스케줄러/런처 스크립트 존재
+foreach ($script in @('Track-Schedule.ps1','Track-Register.bat','Track-Unregister.bat','Run-IdleDryRun.bat','Run-IdleCleanup.bat')) {
+    if (Test-Path (Join-Path $PSScriptRoot $script)) {
+        Write-Host "[PASS] 스크립트 존재: $script" -ForegroundColor Green
+    } else {
+        Write-Host "[FAIL] 스크립트 누락: $script" -ForegroundColor Red
+    }
+}
