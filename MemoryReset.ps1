@@ -360,7 +360,7 @@ function Test-IsClaudeOrphan {
     param($ClaudeProc, $AllProcs)
     $parent = $AllProcs | Where-Object { $_.ProcessId -eq $ClaudeProc.ParentProcessId } | Select-Object -First 1
     if (-not $parent) { return $true }
-    return ($parent.Name -notmatch '(?i)^(Code|Antigravity|claude|cursor|windsurf|cmd|pwsh|powershell|bash|wsl|explorer|conhost)\.exe$')
+    return ($parent.Name -notmatch '(?i)^(Code|Antigravity|claude|cursor|windsurf|codex|node_repl|node|cmd|pwsh|powershell|bash|wsl|explorer|conhost)\.exe$')
 }
 
 function ConvertFrom-KeepPidsString {
@@ -490,9 +490,21 @@ function Get-TargetProcesses {
         ($_.Name -match '(?i)^Antigravity(\.exe)?$' -and $_.ExecutablePath -match '(?i)Antigravity')
     }
 
+    # ── Codex CLI 식별 ──
+    # OpenAI Codex CLI. 화이트리스트(설치 경로) anchored.
+    #   1) codex.exe    : ...\@openai\codex\...\codex.exe (WinGet npm) 또는 ...\OpenAI\Codex\...
+    #   2) node_repl.exe: %LOCALAPPDATA%\OpenAI\Codex\runtimes\...\node_repl.exe (Codex 전용 런타임)
+    # codex 가 spawn 한 pwsh/node 부산물은 여기서 이름으로 잡지 않음 (범용 셸 오탐 위험) —
+    # root(codex.exe/node_repl.exe) 종료 시 taskkill /T 로 자식 트리가 함께 정리됨.
+    $codex = $allProcs | Where-Object {
+        $exe = if ($_.ExecutablePath) { $_.ExecutablePath } else { '' }
+        ($_.Name -match '(?i)^codex\.exe$'     -and $exe -match '(?i)\\(@openai\\codex|OpenAI\\Codex)\\') -or
+        ($_.Name -match '(?i)^node_repl\.exe$' -and $exe -match '(?i)\\OpenAI\\Codex\\')
+    }
+
     # 중복 제거 + 자기 자신(현재 PowerShell) 제외
     $self = $PID
-    $merged = @($claude) + @($antigravity) |
+    $merged = @($claude) + @($antigravity) + @($codex) |
         Where-Object { $_.ProcessId -ne $self } |
         Sort-Object ProcessId -Unique
 
@@ -505,7 +517,7 @@ function Get-TargetProcesses {
     # Antigravity 본체 (.exe 자체) 는 IDE 자체이므로 orphan 개념 무관 → 안전을 위해 OnlyOrphans 모드에서 제외.
     if ($OnlyOrphans) {
         $merged = $merged | Where-Object {
-            $_.Name -match '(?i)^(claude|node)\.exe$' -and (Test-IsClaudeOrphan -ClaudeProc $_ -AllProcs $allProcs)
+            $_.Name -match '(?i)^(claude|node|codex|node_repl)\.exe$' -and (Test-IsClaudeOrphan -ClaudeProc $_ -AllProcs $allProcs)
         }
     }
 
@@ -689,7 +701,7 @@ function Show-ZombieAnalysis {
 
     $allProcs = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue
     $targets  = @(Get-TargetProcesses)   # v1.3 안전: pipeline unwrap 방지
-    $claudes  = @($targets | Where-Object { $_.Name -match '(?i)^(claude|node)\.exe$' })
+    $claudes  = @($targets | Where-Object { $_.Name -match '(?i)^(claude|node|codex|node_repl)\.exe$' })
 
     if ($claudes.Count -eq 0) {
         Write-Host " (분석할 claude.exe / node.exe 프로세스 없음)" -ForegroundColor DarkGray
@@ -708,7 +720,7 @@ function Show-ZombieAnalysis {
         if (-not $hostProc) {
             Write-Host (" [DEAD] 부모 PID {0,-6} — claude {1}개 / {2} MB → 전부 orphan" -f $hostPid, $g.Count, $totalMB) -ForegroundColor Red
             $orphans += $g.Group
-        } elseif ($hostProc.Name -notmatch '(?i)^(Code|Antigravity|claude|cursor|windsurf|cmd|pwsh|powershell|bash|wsl|explorer|conhost)\.exe$') {
+        } elseif ($hostProc.Name -notmatch '(?i)^(Code|Antigravity|claude|cursor|windsurf|codex|node_repl|node|cmd|pwsh|powershell|bash|wsl|explorer|conhost)\.exe$') {
             Write-Host (" [REUSED] 부모 PID {0,-6} [{1}] PID 재사용 — claude {2}개 / {3} MB" -f $hostPid, $hostProc.Name, $g.Count, $totalMB) -ForegroundColor Red
             $orphans += $g.Group
         } else {
@@ -1316,7 +1328,7 @@ function Get-ReclaimCandidates {
     foreach ($t in $targets) {
         $entry    = $state.processes["$([int]$t.ProcessId)"]
         $isIdle   = Test-ProcessIdle -Entry $entry -Settings $Settings -Now $now
-        $isOrphan = ($t.Name -match '(?i)^(claude|node)\.exe$') -and (Test-IsClaudeOrphan -ClaudeProc $t -AllProcs $allProcs)
+        $isOrphan = ($t.Name -match '(?i)^(claude|node|codex|node_repl)\.exe$') -and (Test-IsClaudeOrphan -ClaudeProc $t -AllProcs $allProcs)
         if ($isIdle -or $isOrphan) {
             $idleMin = $null
             if ($entry -and $entry.lastActiveAt) {
@@ -1504,6 +1516,8 @@ if ($targets.Count -eq 0) {
         if ($p.ExecutablePath -match '(?i)\\\.vscode\\extensions')                                 { return 'Claude(VS Code ext)' }
         if ($p.ExecutablePath -match '(?i)\\npm\\node_modules\\@anthropic-ai\\claude-code')        { return 'Claude(npm global)' }
         if ($p.ExecutablePath -match '(?i)\\Claude\\claude-code\\')                                { return 'Claude(standalone)' }
+        if ($p.ExecutablePath -match '(?i)\\(@openai\\codex|OpenAI\\Codex)\\')                     { return 'Codex' }
+        if ($p.Name -match '(?i)^node_repl\.exe$')                                                 { return 'Codex(runtime)' }
         if ($p.Name -eq 'node.exe')                                                                { return 'Claude(node)' }
         return '기타(unknown)'
     }
