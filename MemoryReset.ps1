@@ -1390,7 +1390,7 @@ function Format-AlertMessage {
     }
     $lines += ""
     $lines += "Preview: <code>Run-IdleDryRun.bat</code>"
-    $lines += "Auto cleanup: <code>ClaudeCodeMemoryCleanup</code> task runs every 2 hours <code>-IdleOnly</code>"
+    $lines += "Auto cleanup: <code>ClaudeCodeMemoryCleanup</code> task runs <code>-IdleOnly</code> every 3 hours"
     $lines += "Immediate cleanup: <code>Run-IdleCleanup.bat</code>"
     return ($lines -join "`n")
 }

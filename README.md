@@ -192,12 +192,12 @@ Track-Register.bat            :: Register -TrackActivity in Task Scheduler (UAC 
 Track-Unregister.bat          :: Unregister
 ```
 
-**2) Telegram alert when threshold is exceeded**: When the bot token/chat_id is added to `tracker-settings.json`, you receive a Telegram alert when idle/orphan processes exceed a threshold (count/memory/RAM%). The alert tick itself does not terminate processes, and the registered auto cleanup task handles them with `-IdleOnly` every 2 hours.
+**2) Telegram alerts when threshold exceeded**: If you put the bot token/chat_id in `tracker-settings.json`, you receive Telegram alerts when idle/orphan processes exceed thresholds (count/memory/RAM%). The alert tick itself does not terminate anything, and the registered auto cleanup task handles them every 3 hours with `-IdleOnly`.
 
 **3) Register auto cleanup / clean up now**:
 
 ```cmd
-Cleanup-Schedule.ps1          :: Register -IdleOnly auto cleanup every 2 hours
+Cleanup-Schedule.ps1          :: Register every 3 hours -IdleOnly auto cleanup
 Run-IdleDryRun.bat            :: Preview idle/orphan cleanup targets (no termination)
 Run-IdleCleanup.bat           :: Actual termination + memory recovery
 ```

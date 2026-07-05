@@ -4,7 +4,7 @@
     Register/unregister MemoryReset auto cleanup(-IdleOnly) with Windows Task Scheduler.
 
 .DESCRIPTION
-    Runs -IdleOnly -SkipConfirmation unattended (hidden window) at IntervalHours(default 2) intervals.
+    Run -IdleOnly -SkipConfirmation unattended(hidden window) at IntervalHours(default 3) intervals.
     Terminate only idle(idleMinutes+ inactivity, CPU rate<threshold) / orphan(parent dead) processes → preserve active sessions.
     Termination(kill) requires administrator privileges, so register at RunLevel Highest (elevation without UAC in the login session).
     Registration/unregistration also requires administrator privileges, so request UAC elevation automatically.
@@ -16,15 +16,15 @@
     Unregister task (registration is default).
 
 .PARAMETER IntervalHours
-    Run interval (hours). Default 2.
+    Execution interval(hours). Default 3.
 
 .EXAMPLE
-    .\Cleanup-Schedule.ps1                 # Register every 2 hours
+    .\Cleanup-Schedule.ps1                 # Register every 3 hours
     .\Cleanup-Schedule.ps1 -IntervalHours 6
     .\Cleanup-Schedule.ps1 -Remove         # Unregister
 #>
 [CmdletBinding()]
-param([switch]$Remove, [int]$IntervalHours = 2)
+param([switch]$Remove, [int]$IntervalHours = 3)
 
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
@@ -64,7 +64,7 @@ if (-not (Test-Path $scriptPath)) {
     Write-Host "[X] Cannot find MemoryReset.ps1 in the same folder: $scriptPath" -ForegroundColor Red
     exit 1
 }
-if ($IntervalHours -lt 1) { $IntervalHours = 2 }
+if ($IntervalHours -lt 1) { $IntervalHours = 3 }
 
 try {
     $argStr   = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$scriptPath`" -IdleOnly -SkipConfirmation -KeepAlive"

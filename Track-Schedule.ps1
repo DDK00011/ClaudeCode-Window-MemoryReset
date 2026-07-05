@@ -82,7 +82,7 @@ try {
     Write-Host "[OK] Tracking task registered: $taskName" -ForegroundColor Green
     Write-Host ("    → Every {0} min run -TrackActivity unattended (window hidden)" -f $interval) -ForegroundColor DarkGray
     Write-Host "    → CPU snapshots only + Telegram alert when threshold exceeded. Process termination handled by auto cleanup/manual cleanup." -ForegroundColor DarkGray
-    Write-Host "    → Auto cleanup: Cleanup-Schedule.ps1 (default 2 hours). Immediate cleanup: Run-IdleDryRun.bat → Run-IdleCleanup.bat" -ForegroundColor DarkGray
+    Write-Host "    → Auto cleanup: Cleanup-Schedule.ps1 (default 3 hours). Immediate cleanup: Run-IdleDryRun.bat → Run-IdleCleanup.bat" -ForegroundColor DarkGray
     Write-Host "    → Unregister: Track-Unregister.bat" -ForegroundColor DarkGray
 } catch {
     Write-Host "[X] Task registration failed: $($_.Exception.Message)" -ForegroundColor Red
