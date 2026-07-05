@@ -18,7 +18,7 @@ if ($errors.Count -gt 0) {
     $errors | Format-List
     exit 1
 }
-foreach ($fnName in @('Test-IsClaudeOrphan','Test-IsCodexProcess','Get-DescendantPids','Get-CodexProtectedPids','Get-TargetProcesses')) {
+foreach ($fnName in @('Test-IsClaudeOrphan','Test-IsCodexProcess','Get-DescendantPids','Get-CodexRootPids','Get-TargetProcesses')) {
     $fnAst = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $fnName }, $true)
     if (-not $fnAst) {
         Write-Host "함수 추출 실패: $fnName" -ForegroundColor Red
@@ -35,6 +35,7 @@ $targets | Group-Object {
     if ($_.ExecutablePath -match '(?i)\\Programs\\Antigravity\\') { 'Antigravity 본체' }
     elseif ($_.ExecutablePath -match '(?i)\\\.antigravity\\extensions') { 'Claude CLI (Antigravity 확장)' }
     elseif ($_.ExecutablePath -match '(?i)\\Claude\\claude-code\\') { 'Claude CLI (standalone)' }
+    elseif (Test-IsCodexProcess $_) { 'Codex CLI' }
     elseif ($_.Name -eq 'node.exe') { 'Claude CLI (node)' }
     else { '기타' }
 } | ForEach-Object {
@@ -67,6 +68,7 @@ $unknown = $targets | Where-Object {
     $_.ExecutablePath -notmatch '(?i)\\Programs\\Antigravity\\' -and
     $_.ExecutablePath -notmatch '(?i)\\\.antigravity\\extensions' -and
     $_.ExecutablePath -notmatch '(?i)\\Claude\\claude-code\\' -and
+    -not (Test-IsCodexProcess $_) -and
     $_.Name -ne 'node.exe'
 }
 if ($unknown) {
@@ -86,20 +88,38 @@ if ($null -eq $selfIncluded) {
 
 Write-Host ""
 Write-Host "== Codex 세션 보존 검증 =="
-if ($funcDef -notmatch '(?i)\bcodex\.exe\b|node_repl\.exe|@openai\\codex|OpenAI\\Codex') {
-    Write-Host "[PASS] Get-TargetProcesses 가 Codex 를 종료 대상으로 수집하지 않음" -ForegroundColor Green
+if ($src -match '(?ms)^function\s+Test-IsCodexProcess\b' -and $src -match '(?ms)^function\s+Get-CodexRootPids\b' -and $src.Contains('@openai[\\/]codex') -and $src -match 'node_repl') {
+    Write-Host "[PASS] Codex CLI 식별/root helper 존재" -ForegroundColor Green
 } else {
-    Write-Host "[FAIL] Get-TargetProcesses 안에 Codex 종료 대상 패턴이 남아 있음" -ForegroundColor Red
+    Write-Host "[FAIL] Codex CLI 식별/root helper 누락" -ForegroundColor Red
 }
-if ($src -match '(?ms)^function\s+Test-IsCodexProcess\b' -and $src -match '(?ms)^function\s+Get-CodexProtectedPids\b' -and $src.Contains('@openai[\\/]codex') -and $src -match 'node_repl') {
-    Write-Host "[PASS] Codex 프로세스/보호 트리 helper 존재" -ForegroundColor Green
+if ($src -match '(?ms)^function\s+Get-ActiveCodexProtectedPids\b' -and $src -match '진행 중인 Codex 세션 보존' -and $src -match '진행 중인 Codex 자손 보존') {
+    Write-Host "[PASS] 진행 중인 Codex 만 종료 방지하는 active guard 존재" -ForegroundColor Green
 } else {
-    Write-Host "[FAIL] Codex 프로세스/보호 트리 helper 누락" -ForegroundColor Red
+    Write-Host "[FAIL] 진행 중인 Codex active guard 누락" -ForegroundColor Red
 }
-if ($src -match 'Get-DescendantPids -RootPids \$codexPids' -and $src -match 'Codex 세션/부모/자손 보존' -and $src -match 'Codex 자손 보존') {
-    Write-Host "[PASS] Codex 세션의 부모/자손 트리 종료 방지 가드 존재" -ForegroundColor Green
+if ($src -match 'lastIoOps' -and $src -match 'lastIoBytes' -and $src -match 'Get-DescendantPids -RootPids @\(\$procId\)') {
+    Write-Host "[PASS] Codex 트리 CPU/I/O 활동 추적 존재" -ForegroundColor Green
 } else {
-    Write-Host "[FAIL] Codex 보호 트리 가드 누락" -ForegroundColor Red
+    Write-Host "[FAIL] Codex 트리 활동 추적 누락" -ForegroundColor Red
+}
+if (($src | Select-String -Pattern 'Update-ActivityState -Settings \$idleSettings' -AllMatches).Matches.Count -gt 0 -and
+    ($src | Select-String -Pattern 'Update-ActivityState -Settings \$codexSettings' -AllMatches).Matches.Count -gt 0) {
+    Write-Host "[PASS] 정리 직전 Codex 활동 스냅샷 갱신" -ForegroundColor Green
+} else {
+    Write-Host "[FAIL] 정리 직전 활동 스냅샷 갱신 누락" -ForegroundColor Red
+}
+if (($src | Select-String -Pattern '-not \(Test-IsCodexProcess \$_\)' -AllMatches).Matches.Count -gt 0 -and
+    ($src | Select-String -Pattern '-not \(Test-IsCodexProcess \$t\)' -AllMatches).Matches.Count -gt 0) {
+    Write-Host "[PASS] Codex 는 orphan 즉시 종료가 아니라 idle 판정만 사용" -ForegroundColor Green
+} else {
+    Write-Host "[FAIL] Codex orphan 즉시 종료 제외 가드 누락" -ForegroundColor Red
+}
+if ($src -notmatch '(?ms)function\s+Get-CodexRootPids\b.*?return ,@\(\)' -and
+    $src -notmatch '(?ms)function\s+Get-ActiveCodexProtectedPids\b.*?return ,@\(\)') {
+    Write-Host "[PASS] 빈 배열 반환 double-wrap 없음" -ForegroundColor Green
+} else {
+    Write-Host "[FAIL] Codex helper 안에 return ,@() 발견 — 빈 배열이 원소 1개로 보일 수 있음" -ForegroundColor Red
 }
 if ($src -notmatch '(?im)^\s*\$pid\s*=') {
     Write-Host "[PASS] PowerShell 자동 변수 `$PID 덮어쓰기 없음" -ForegroundColor Green
