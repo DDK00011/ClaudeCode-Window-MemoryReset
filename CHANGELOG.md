@@ -8,7 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
-- Codex sessions are no longer cleanup targets. Removed the direct `codex.exe` / `node_repl.exe` target collector and added a Codex protection guard so Codex processes, their parent chain, and descendants are excluded from target collection and skipped before any graceful close or `taskkill /T` path.
+- Codex cleanup is now activity-based instead of blanket-blocked. Codex CLI roots are cleanup targets again, but active/unknown Codex process trees are skipped before `CloseMainWindow` or `taskkill /T`; only sessions proven idle by tracking history are reclaim candidates.
+- Codex activity tracking now aggregates CPU and I/O across the Codex process tree, so work happening in child `node_repl.exe`, `pwsh.exe`, `cmd.exe`, or tool processes refreshes `lastActiveAt`.
+- Idle cleanup refreshes activity state immediately before candidate selection and before termination, avoiding stale idle history killing a newly active Codex session.
 
 ## [1.4.1] — 2026-06-14
 

@@ -393,9 +393,9 @@ function Test-IsCodexProcess {
     $exe = if ($Proc.ExecutablePath) { $Proc.ExecutablePath } else { '' }
     $cmd = if ($Proc.CommandLine)    { $Proc.CommandLine }    else { '' }
     return (
-        $Proc.Name -match '(?i)^(codex|node_repl)\.exe$' -or
-        $exe -match '(?i)\\(@openai\\codex|OpenAI\\Codex)\\' -or
-        $cmd -match '(?i)@openai[\\/]codex|OpenAI[\\/]Codex'
+        ($Proc.Name -match '(?i)^codex\.exe$' -and ($exe -match '(?i)\\@openai\\codex\\' -or $cmd -match '(?i)@openai[\\/]codex')) -or
+        ($Proc.Name -match '(?i)^node_repl\.exe$' -and $exe -match '(?i)\\OpenAI\\Codex\\') -or
+        ($Proc.Name -eq 'node.exe' -and $cmd -match '(?i)@openai[\\/]codex')
     )
 }
 
@@ -436,25 +436,43 @@ function Get-DescendantPids {
     return $result.ToArray()
 }
 
-function Get-CodexProtectedPids {
+function Get-CodexRootPids {
     param($AllProcs)
     $codexPids = @($AllProcs | Where-Object { Test-IsCodexProcess $_ } | ForEach-Object { [int]$_.ProcessId })
-    if ($codexPids.Count -eq 0) { return ,@() }
+    if ($codexPids.Count -eq 0) { return @() }
 
     $byPid = @{}
     foreach ($ap in $AllProcs) { $byPid[[int]$ap.ProcessId] = $ap }
-    $protected = @{}
+    $roots = @{}
 
     foreach ($cpid in $codexPids) {
         $cur = $byPid[[int]$cpid]
+        $root = $cur
         while ($cur) {
-            $procId = [int]$cur.ProcessId
-            if ($protected.ContainsKey($procId)) { break }
-            $protected[$procId] = $true
-            $cur = $byPid[[int]$cur.ParentProcessId]
+            $parent = $byPid[[int]$cur.ParentProcessId]
+            if (-not $parent -or -not (Test-IsCodexProcess $parent)) { break }
+            $root = $parent
+            $cur = $parent
+        }
+        if ($root) { $roots[[int]$root.ProcessId] = $true }
+    }
+    return @($roots.Keys | ForEach-Object { [int]$_ })
+}
+
+function Get-ActiveCodexProtectedPids {
+    param($AllProcs, $State, $Settings, $Now)
+    $activeRoots = @()
+    foreach ($rootPid in @(Get-CodexRootPids -AllProcs $AllProcs)) {
+        $entry = if ($State -and $State.processes) { $State.processes["$rootPid"] } else { $null }
+        if (-not (Test-ProcessIdle -Entry $entry -Settings $Settings -Now $Now)) {
+            $activeRoots += [int]$rootPid
         }
     }
-    foreach ($dpid in @(Get-DescendantPids -RootPids $codexPids -AllProcs $AllProcs)) {
+    if ($activeRoots.Count -eq 0) { return @() }
+
+    $protected = @{}
+    foreach ($rootPid in $activeRoots) { $protected[[int]$rootPid] = $true }
+    foreach ($dpid in @(Get-DescendantPids -RootPids $activeRoots -AllProcs $AllProcs)) {
         $protected[[int]$dpid] = $true
     }
     return @($protected.Keys | ForEach-Object { [int]$_ })
@@ -469,7 +487,6 @@ function Get-TargetProcesses {
         [switch]$IncludeDescendants
     )
     $allProcs = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue
-    $codexProtectedPids = @(Get-CodexProtectedPids -AllProcs $allProcs)
 
     # ── Identify Claude Code CLI ──
     # Whitelist(install paths) based: only target claude.exe/node.exe run from locations below.
@@ -527,14 +544,16 @@ function Get-TargetProcesses {
         ($_.Name -match '(?i)^Antigravity(\.exe)?$' -and $_.ExecutablePath -match '(?i)Antigravity')
     }
 
+    # ── Identify Codex CLI ──
+    # Include in cleanup targets, but preserve if "in progress" by activity tracking status before actual termination.
+    $codexRootPids = @(Get-CodexRootPids -AllProcs $allProcs)
+    $codex = $allProcs | Where-Object { $codexRootPids -contains [int]$_.ProcessId }
+
     # Deduplicate + exclude self (current PowerShell)
     $self = $PID
-    $merged = @($claude) + @($antigravity) |
+    $merged = @($claude) + @($antigravity) + @($codex) |
         Where-Object { $_.ProcessId -ne $self } |
         Sort-Object ProcessId -Unique
-    if ($codexProtectedPids.Count -gt 0) {
-        $merged = $merged | Where-Object { $codexProtectedPids -notcontains [int]$_.ProcessId }
-    }
 
     # v1.3: -ExcludePids — exclude user-specified PIDs from termination targets (preserve active sessions)
     if ($ExcludePids.Count -gt 0) {
@@ -545,7 +564,9 @@ function Get-TargetProcesses {
     # Antigravity main app (.exe itself) is the IDE, so orphan concept does not apply → excluded in OnlyOrphans mode for safety.
     if ($OnlyOrphans) {
         $merged = $merged | Where-Object {
-            $_.Name -match '(?i)^(claude|node)\.exe$' -and (Test-IsClaudeOrphan -ClaudeProc $_ -AllProcs $allProcs)
+            (-not (Test-IsCodexProcess $_)) -and
+            $_.Name -match '(?i)^(claude|node)\.exe$' -and
+            (Test-IsClaudeOrphan -ClaudeProc $_ -AllProcs $allProcs)
         }
     }
 
@@ -560,8 +581,7 @@ function Get-TargetProcesses {
                 $descProcs = $allProcs | Where-Object {
                     ($descPids -contains [int]$_.ProcessId) -and
                     ([int]$_.ProcessId -ne $self) -and
-                    ($ExcludePids.Count -eq 0 -or $ExcludePids -notcontains $_.ProcessId) -and
-                    ($codexProtectedPids -notcontains [int]$_.ProcessId)
+                    ($ExcludePids.Count -eq 0 -or $ExcludePids -notcontains $_.ProcessId)
                 }
                 $merged = @($merged) + @($descProcs) | Sort-Object ProcessId -Unique
             }
@@ -587,11 +607,13 @@ function Stop-TargetProcesses {
     }
 
     $allProcs = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
-    $protectedCodexPids = @(Get-CodexProtectedPids -AllProcs $allProcs)
-    if ($protectedCodexPids.Count -gt 0) {
+    $codexSettings = Get-TrackerSettings
+    $codexState = Update-ActivityState -Settings $codexSettings
+    $activeCodexPids = @(Get-ActiveCodexProtectedPids -AllProcs $allProcs -State $codexState -Settings $codexSettings -Now (Get-Date))
+    if ($activeCodexPids.Count -gt 0) {
         $Processes = @($Processes | Where-Object {
-            if ($protectedCodexPids -contains [int]$_.ProcessId) {
-                Write-Host " [SKIP] Preserve Codex session/parent/descendant → $($_.Name) (PID=$($_.ProcessId))" -ForegroundColor Green
+            if ($activeCodexPids -contains [int]$_.ProcessId) {
+                Write-Host " [SKIP] Preserve active Codex session → $($_.Name) (PID=$($_.ProcessId))" -ForegroundColor Green
                 return $false
             }
             return $true
@@ -650,9 +672,9 @@ function Stop-TargetProcesses {
     foreach ($p in $survivors) {
         $tag = "$($p.Name) (PID=$($p.ProcessId))"
         $descPids = @(Get-DescendantPids -RootPids @([int]$p.ProcessId) -AllProcs $allProcs)
-        $hasCodexChild = @($descPids | Where-Object { $protectedCodexPids -contains [int]$_ }).Count -gt 0
+        $hasCodexChild = @($descPids | Where-Object { $activeCodexPids -contains [int]$_ }).Count -gt 0
         if ($hasCodexChild) {
-            Write-Host " [SKIP] $tag (preserve Codex descendants)" -ForegroundColor Green
+            Write-Host " [SKIP] $tag (Preserve active Codex descendant)" -ForegroundColor Green
             continue
         } else {
             $null = & taskkill.exe /F /T /PID $p.ProcessId 2>&1
@@ -1297,6 +1319,9 @@ function Update-ActivityState {
     if ($null -eq $state.processes) { $state.processes = @{} }
 
     $targets = @(Get-TargetProcesses)
+    $allProcs = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
+    $cimByPid = @{}
+    foreach ($p in $allProcs) { $cimByPid[[int]$p.ProcessId] = $p }
     $gp = @{}
     Get-Process -ErrorAction SilentlyContinue | ForEach-Object { $gp[[int]$_.Id] = $_ }
 
@@ -1304,14 +1329,32 @@ function Update-ActivityState {
     foreach ($t in $targets) {
         $procId = [int]$t.ProcessId
         $seen["$procId"] = $true
-        $proc     = $gp[$procId]
-        $cpuSec   = if ($proc -and $null -ne $proc.CPU) { [double]$proc.CPU } else { $null }
+        $treePids = if (Test-IsCodexProcess $t) {
+            @($procId) + @(Get-DescendantPids -RootPids @($procId) -AllProcs $allProcs)
+        } else {
+            @($procId)
+        }
+        $cpuSec = $null
+        $ioOps = [UInt64]0
+        $ioBytes = [UInt64]0
+        foreach ($treePid in $treePids) {
+            $proc = $gp[[int]$treePid]
+            if ($proc -and $null -ne $proc.CPU) {
+                if ($null -eq $cpuSec) { $cpuSec = [double]0 }
+                $cpuSec += [double]$proc.CPU
+            }
+            $cim = $cimByPid[[int]$treePid]
+            if ($cim) {
+                $ioOps += [UInt64]$cim.ReadOperationCount + [UInt64]$cim.WriteOperationCount + [UInt64]$cim.OtherOperationCount
+                $ioBytes += [UInt64]$cim.ReadTransferCount + [UInt64]$cim.WriteTransferCount + [UInt64]$cim.OtherTransferCount
+            }
+        }
         $creation = if ($t.CreationDate) { ([datetime]$t.CreationDate).ToString('o') } else { '' }
         $key      = "$procId"
         $entry    = $state.processes[$key]
 
         if ($entry -and $entry.creationDate -eq $creation) {
-            # Same process (PID+creation time match) — determine activity from CPU delta
+            # Same process (PID+creation time match) — determine activity from CPU/I/O delta
             if ($null -ne $cpuSec -and $null -ne $entry.lastCpuSec) {
                 $lastSeen = ConvertTo-DateTimeSafe $entry.lastSeenAt
                 $dSec = if ($lastSeen) { ($now - $lastSeen).TotalSeconds } else { 0 }
@@ -1323,7 +1366,11 @@ function Update-ActivityState {
                     if ($ratePct -ge [double]$Settings.cpuThresholdPct) { $entry.lastActiveAt = $nowIso }
                 }
             }
+            if ($null -ne $entry.lastIoOps -and ([UInt64]$ioOps -gt [UInt64]$entry.lastIoOps)) { $entry.lastActiveAt = $nowIso }
+            if ($null -ne $entry.lastIoBytes -and ([UInt64]$ioBytes -gt [UInt64]$entry.lastIoBytes)) { $entry.lastActiveAt = $nowIso }
             if ($null -ne $cpuSec) { $entry.lastCpuSec = $cpuSec }
+            $entry.lastIoOps   = $ioOps
+            $entry.lastIoBytes = $ioBytes
             $entry.lastSeenAt = $nowIso
             $entry.name       = [string]$t.Name
             $entry.wsBytes    = [long]$t.WorkingSetSize
@@ -1338,6 +1385,8 @@ function Update-ActivityState {
                 lastActiveAt   = $nowIso
                 lastCpuSec     = $cpuSec
                 lastCpuRatePct = $null
+                lastIoOps      = $ioOps
+                lastIoBytes    = $ioBytes
                 lastSeenAt     = $nowIso
                 wsBytes        = [long]$t.WorkingSetSize
                 ppid           = [int]$t.ParentProcessId
@@ -1356,7 +1405,8 @@ function Update-ActivityState {
 
 function Test-ProcessIdle {
     # Safe determination: (1)idleMinutes elapsed since tracking started(sufficient observation) AND (2)idleMinutes elapsed since last activity
-    #            AND (3)previous interval CPU rate < threshold. If any condition is unmet → preserve(false). Prevent false positives for active sessions.
+    #            AND (3) previous interval CPU rate < threshold. Codex updates lastActiveAt from tree-wide CPU/I/O.
+    #            Any unmet condition → preserve(false). Prevent active session false positives.
     param($Entry, $Settings, $Now)
     if (-not $Entry) { return $false }
     $first  = ConvertTo-DateTimeSafe $Entry.firstTrackedAt
@@ -1380,7 +1430,9 @@ function Get-ReclaimCandidates {
     foreach ($t in $targets) {
         $entry    = $state.processes["$([int]$t.ProcessId)"]
         $isIdle   = Test-ProcessIdle -Entry $entry -Settings $Settings -Now $now
-        $isOrphan = ($t.Name -match '(?i)^(claude|node)\.exe$') -and (Test-IsClaudeOrphan -ClaudeProc $t -AllProcs $allProcs)
+        $isOrphan = (-not (Test-IsCodexProcess $t)) -and
+                    ($t.Name -match '(?i)^(claude|node)\.exe$') -and
+                    (Test-IsClaudeOrphan -ClaudeProc $t -AllProcs $allProcs)
         if ($isIdle -or $isOrphan) {
             $idleMin = $null
             if ($entry -and $entry.lastActiveAt) {
@@ -1548,6 +1600,7 @@ $targets = @(Get-TargetProcesses -ExcludePids $excludePidsArray -OnlyOrphans:$Or
 #       Active sessions use CPU within idleMinutes, so excluded from candidates → active preserved.
 if ($IdleOnly) {
     $idleSettings = Get-TrackerSettings
+    $null = Update-ActivityState -Settings $idleSettings
     $idleCand = @(Get-ReclaimCandidates -Settings $idleSettings)
     $idlePids = @($idleCand | ForEach-Object { $_.ProcessId })
     $targets  = @($targets | Where-Object { $idlePids -contains $_.ProcessId })

@@ -18,7 +18,7 @@ if ($errors.Count -gt 0) {
     $errors | Format-List
     exit 1
 }
-foreach ($fnName in @('Test-IsClaudeOrphan','Test-IsCodexProcess','Get-DescendantPids','Get-CodexProtectedPids','Get-TargetProcesses')) {
+foreach ($fnName in @('Test-IsClaudeOrphan','Test-IsCodexProcess','Get-DescendantPids','Get-CodexRootPids','Get-TargetProcesses')) {
     $fnAst = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $fnName }, $true)
     if (-not $fnAst) {
         Write-Host "Function extraction failed: $fnName" -ForegroundColor Red
@@ -35,6 +35,7 @@ $targets | Group-Object {
     if ($_.ExecutablePath -match '(?i)\\Programs\\Antigravity\\') { 'Antigravity main app' }
     elseif ($_.ExecutablePath -match '(?i)\\\.antigravity\\extensions') { 'Claude CLI (Antigravity extension)' }
     elseif ($_.ExecutablePath -match '(?i)\\Claude\\claude-code\\') { 'Claude CLI (standalone)' }
+    elseif (Test-IsCodexProcess $_) { 'Codex CLI' }
     elseif ($_.Name -eq 'node.exe') { 'Claude CLI (node)' }
     else { 'Other' }
 } | ForEach-Object {
@@ -67,6 +68,7 @@ $unknown = $targets | Where-Object {
     $_.ExecutablePath -notmatch '(?i)\\Programs\\Antigravity\\' -and
     $_.ExecutablePath -notmatch '(?i)\\\.antigravity\\extensions' -and
     $_.ExecutablePath -notmatch '(?i)\\Claude\\claude-code\\' -and
+    -not (Test-IsCodexProcess $_) -and
     $_.Name -ne 'node.exe'
 }
 if ($unknown) {
@@ -86,20 +88,38 @@ if ($null -eq $selfIncluded) {
 
 Write-Host ""
 Write-Host "== Codex session preservation verification =="
-if ($funcDef -notmatch '(?i)\bcodex\.exe\b|node_repl\.exe|@openai\\codex|OpenAI\\Codex') {
-    Write-Host "[PASS] Get-TargetProcesses does not collect Codex as a termination target" -ForegroundColor Green
+if ($src -match '(?ms)^function\s+Test-IsCodexProcess\b' -and $src -match '(?ms)^function\s+Get-CodexRootPids\b' -and $src.Contains('@openai[\\/]codex') -and $src -match 'node_repl') {
+    Write-Host "[PASS] Codex CLI identification/root helper present" -ForegroundColor Green
 } else {
-    Write-Host "[FAIL] Codex termination target patterns remain in Get-TargetProcesses" -ForegroundColor Red
+    Write-Host "[FAIL] Codex CLI identification/root helper missing" -ForegroundColor Red
 }
-if ($src -match '(?ms)^function\s+Test-IsCodexProcess\b' -and $src -match '(?ms)^function\s+Get-CodexProtectedPids\b' -and $src.Contains('@openai[\\/]codex') -and $src -match 'node_repl') {
-    Write-Host "[PASS] Codex process/protected tree helper exists" -ForegroundColor Green
+if ($src -match '(?ms)^function\s+Get-ActiveCodexProtectedPids\b' -and $src -match 'Preserve active Codex session' -and $src -match 'Preserve active Codex descendant') {
+    Write-Host "[PASS] active guard exists that prevents termination of only active Codex" -ForegroundColor Green
 } else {
-    Write-Host "[FAIL] Codex process/protected tree helper missing" -ForegroundColor Red
+    Write-Host "[FAIL] active Codex active guard missing" -ForegroundColor Red
 }
-if ($src -match 'Get-DescendantPids -RootPids \$codexPids' -and $src -match 'Codex session/parent/descendant preservation' -and $src -match 'Codex descendant preservation') {
-    Write-Host "[PASS] Codex session parent/descendant tree termination prevention guard exists" -ForegroundColor Green
+if ($src -match 'lastIoOps' -and $src -match 'lastIoBytes' -and $src -match 'Get-DescendantPids -RootPids @\(\$procId\)') {
+    Write-Host "[PASS] Codex tree CPU/I/O activity tracking exists" -ForegroundColor Green
 } else {
-    Write-Host "[FAIL] Codex protected tree guard missing" -ForegroundColor Red
+    Write-Host "[FAIL] Codex tree activity tracking missing" -ForegroundColor Red
+}
+if (($src | Select-String -Pattern 'Update-ActivityState -Settings \$idleSettings' -AllMatches).Matches.Count -gt 0 -and
+    ($src | Select-String -Pattern 'Update-ActivityState -Settings \$codexSettings' -AllMatches).Matches.Count -gt 0) {
+    Write-Host "[PASS] Codex activity snapshot updated immediately before cleanup" -ForegroundColor Green
+} else {
+    Write-Host "[FAIL] activity snapshot update missing immediately before cleanup" -ForegroundColor Red
+}
+if (($src | Select-String -Pattern '-not \(Test-IsCodexProcess \$_\)' -AllMatches).Matches.Count -gt 0 -and
+    ($src | Select-String -Pattern '-not \(Test-IsCodexProcess \$t\)' -AllMatches).Matches.Count -gt 0) {
+    Write-Host "[PASS] Codex orphan processes use idle determination only instead of immediate termination" -ForegroundColor Green
+} else {
+    Write-Host "[FAIL] Codex orphan immediate termination exclusion guard missing" -ForegroundColor Red
+}
+if ($src -notmatch '(?ms)function\s+Get-CodexRootPids\b.*?return ,@\(\)' -and
+    $src -notmatch '(?ms)function\s+Get-ActiveCodexProtectedPids\b.*?return ,@\(\)') {
+    Write-Host "[PASS] empty array return double-wrap absent" -ForegroundColor Green
+} else {
+    Write-Host "[FAIL] Found return ,@() in Codex helper — empty array may appear as 1 element" -ForegroundColor Red
 }
 if ($src -notmatch '(?im)^\s*\$pid\s*=') {
     Write-Host "[PASS] PowerShell automatic variable `$PID not overwritten" -ForegroundColor Green
