@@ -387,6 +387,18 @@ function ConvertFrom-KeepPidsString {
     return ,$valid
 }
 
+function Test-IsCodexProcess {
+    param($Proc)
+    if (-not $Proc) { return $false }
+    $exe = if ($Proc.ExecutablePath) { $Proc.ExecutablePath } else { '' }
+    $cmd = if ($Proc.CommandLine)    { $Proc.CommandLine }    else { '' }
+    return (
+        $Proc.Name -match '(?i)^(codex|node_repl)\.exe$' -or
+        $exe -match '(?i)\\(@openai\\codex|OpenAI\\Codex)\\' -or
+        $cmd -match '(?i)@openai[\\/]codex|OpenAI[\\/]Codex'
+    )
+}
+
 # ════════════════════════════════════════════════════════════════════
 # 5. 대상 프로세스 식별
 #    핵심 안전장치: Claude Desktop 앱은 절대 매칭 금지 (다중 설치 경로 블랙리스트).
@@ -424,6 +436,30 @@ function Get-DescendantPids {
     return $result.ToArray()
 }
 
+function Get-CodexProtectedPids {
+    param($AllProcs)
+    $codexPids = @($AllProcs | Where-Object { Test-IsCodexProcess $_ } | ForEach-Object { [int]$_.ProcessId })
+    if ($codexPids.Count -eq 0) { return ,@() }
+
+    $byPid = @{}
+    foreach ($ap in $AllProcs) { $byPid[[int]$ap.ProcessId] = $ap }
+    $protected = @{}
+
+    foreach ($cpid in $codexPids) {
+        $cur = $byPid[[int]$cpid]
+        while ($cur) {
+            $procId = [int]$cur.ProcessId
+            if ($protected.ContainsKey($procId)) { break }
+            $protected[$procId] = $true
+            $cur = $byPid[[int]$cur.ParentProcessId]
+        }
+    }
+    foreach ($dpid in @(Get-DescendantPids -RootPids $codexPids -AllProcs $AllProcs)) {
+        $protected[[int]$dpid] = $true
+    }
+    return @($protected.Keys | ForEach-Object { [int]$_ })
+}
+
 function Get-TargetProcesses {
     # reason: 화이트리스트 매칭 + 블랙리스트 + filter 통합 — 30줄 초과 불가피.
     # 분리 시 매칭 규칙이 2곳에 흩어져 유지보수 비용 ↑.
@@ -433,6 +469,7 @@ function Get-TargetProcesses {
         [switch]$IncludeDescendants
     )
     $allProcs = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue
+    $codexProtectedPids = @(Get-CodexProtectedPids -AllProcs $allProcs)
 
     # ── Claude Code CLI 식별 ──
     # 화이트리스트(설치 경로) 기반: 아래 위치에서 실행되는 claude.exe/node.exe 만 대상.
@@ -490,23 +527,14 @@ function Get-TargetProcesses {
         ($_.Name -match '(?i)^Antigravity(\.exe)?$' -and $_.ExecutablePath -match '(?i)Antigravity')
     }
 
-    # ── Codex CLI 식별 ──
-    # OpenAI Codex CLI. 화이트리스트(설치 경로) anchored.
-    #   1) codex.exe    : ...\@openai\codex\...\codex.exe (WinGet npm) 또는 ...\OpenAI\Codex\...
-    #   2) node_repl.exe: %LOCALAPPDATA%\OpenAI\Codex\runtimes\...\node_repl.exe (Codex 전용 런타임)
-    # codex 가 spawn 한 pwsh/node 부산물은 여기서 이름으로 잡지 않음 (범용 셸 오탐 위험) —
-    # root(codex.exe/node_repl.exe) 종료 시 taskkill /T 로 자식 트리가 함께 정리됨.
-    $codex = $allProcs | Where-Object {
-        $exe = if ($_.ExecutablePath) { $_.ExecutablePath } else { '' }
-        ($_.Name -match '(?i)^codex\.exe$'     -and $exe -match '(?i)\\(@openai\\codex|OpenAI\\Codex)\\') -or
-        ($_.Name -match '(?i)^node_repl\.exe$' -and $exe -match '(?i)\\OpenAI\\Codex\\')
-    }
-
     # 중복 제거 + 자기 자신(현재 PowerShell) 제외
     $self = $PID
-    $merged = @($claude) + @($antigravity) + @($codex) |
+    $merged = @($claude) + @($antigravity) |
         Where-Object { $_.ProcessId -ne $self } |
         Sort-Object ProcessId -Unique
+    if ($codexProtectedPids.Count -gt 0) {
+        $merged = $merged | Where-Object { $codexProtectedPids -notcontains [int]$_.ProcessId }
+    }
 
     # v1.3: -ExcludePids — 사용자가 명시한 PID 는 종료 대상에서 제외 (활성 세션 보존)
     if ($ExcludePids.Count -gt 0) {
@@ -517,7 +545,7 @@ function Get-TargetProcesses {
     # Antigravity 본체 (.exe 자체) 는 IDE 자체이므로 orphan 개념 무관 → 안전을 위해 OnlyOrphans 모드에서 제외.
     if ($OnlyOrphans) {
         $merged = $merged | Where-Object {
-            $_.Name -match '(?i)^(claude|node|codex|node_repl)\.exe$' -and (Test-IsClaudeOrphan -ClaudeProc $_ -AllProcs $allProcs)
+            $_.Name -match '(?i)^(claude|node)\.exe$' -and (Test-IsClaudeOrphan -ClaudeProc $_ -AllProcs $allProcs)
         }
     }
 
@@ -532,7 +560,8 @@ function Get-TargetProcesses {
                 $descProcs = $allProcs | Where-Object {
                     ($descPids -contains [int]$_.ProcessId) -and
                     ([int]$_.ProcessId -ne $self) -and
-                    ($ExcludePids.Count -eq 0 -or $ExcludePids -notcontains $_.ProcessId)
+                    ($ExcludePids.Count -eq 0 -or $ExcludePids -notcontains $_.ProcessId) -and
+                    ($codexProtectedPids -notcontains [int]$_.ProcessId)
                 }
                 $merged = @($merged) + @($descProcs) | Sort-Object ProcessId -Unique
             }
@@ -555,6 +584,22 @@ function Stop-TargetProcesses {
     if ($Processes.Count -eq 0) {
         Write-Host "[i] 종료할 대상 프로세스가 없습니다." -ForegroundColor DarkGray
         return
+    }
+
+    $allProcs = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
+    $protectedCodexPids = @(Get-CodexProtectedPids -AllProcs $allProcs)
+    if ($protectedCodexPids.Count -gt 0) {
+        $Processes = @($Processes | Where-Object {
+            if ($protectedCodexPids -contains [int]$_.ProcessId) {
+                Write-Host " [SKIP] Codex 세션/부모/자손 보존 → $($_.Name) (PID=$($_.ProcessId))" -ForegroundColor Green
+                return $false
+            }
+            return $true
+        })
+        if ($Processes.Count -eq 0) {
+            Write-Host "[i] Codex 보존 후 종료할 대상 프로세스가 없습니다." -ForegroundColor DarkGray
+            return
+        }
     }
 
     Write-Host ""
@@ -604,7 +649,14 @@ function Stop-TargetProcesses {
 
     foreach ($p in $survivors) {
         $tag = "$($p.Name) (PID=$($p.ProcessId))"
-        $null = & taskkill.exe /F /T /PID $p.ProcessId 2>&1
+        $descPids = @(Get-DescendantPids -RootPids @([int]$p.ProcessId) -AllProcs $allProcs)
+        $hasCodexChild = @($descPids | Where-Object { $protectedCodexPids -contains [int]$_ }).Count -gt 0
+        if ($hasCodexChild) {
+            Write-Host " [SKIP] $tag (Codex 자손 보존)" -ForegroundColor Green
+            continue
+        } else {
+            $null = & taskkill.exe /F /T /PID $p.ProcessId 2>&1
+        }
         # 0=success, 128=process already gone (cascaded by parent kill) → both OK
         if ($LASTEXITCODE -eq 0) {
             Write-Host " [KILL] $tag" -ForegroundColor Yellow
@@ -701,7 +753,7 @@ function Show-ZombieAnalysis {
 
     $allProcs = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue
     $targets  = @(Get-TargetProcesses)   # v1.3 안전: pipeline unwrap 방지
-    $claudes  = @($targets | Where-Object { $_.Name -match '(?i)^(claude|node|codex|node_repl)\.exe$' })
+    $claudes  = @($targets | Where-Object { $_.Name -match '(?i)^(claude|node)\.exe$' })
 
     if ($claudes.Count -eq 0) {
         Write-Host " (분석할 claude.exe / node.exe 프로세스 없음)" -ForegroundColor DarkGray
@@ -1328,7 +1380,7 @@ function Get-ReclaimCandidates {
     foreach ($t in $targets) {
         $entry    = $state.processes["$([int]$t.ProcessId)"]
         $isIdle   = Test-ProcessIdle -Entry $entry -Settings $Settings -Now $now
-        $isOrphan = ($t.Name -match '(?i)^(claude|node|codex|node_repl)\.exe$') -and (Test-IsClaudeOrphan -ClaudeProc $t -AllProcs $allProcs)
+        $isOrphan = ($t.Name -match '(?i)^(claude|node)\.exe$') -and (Test-IsClaudeOrphan -ClaudeProc $t -AllProcs $allProcs)
         if ($isIdle -or $isOrphan) {
             $idleMin = $null
             if ($entry -and $entry.lastActiveAt) {

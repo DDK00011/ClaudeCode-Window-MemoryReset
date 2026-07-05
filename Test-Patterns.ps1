@@ -9,13 +9,23 @@ if (-not (Test-Path $mainScript)) {
     exit 1
 }
 $src = Get-Content $mainScript -Raw -Encoding UTF8
-# Get-TargetProcesses 함수 추출 (정규식)
-if ($src -match '(?ms)function Get-TargetProcesses \{.*?^\}') {
-    $funcDef = $Matches[0]
-    Invoke-Expression $funcDef
-} else {
-    Write-Host "함수 추출 실패" -ForegroundColor Red
+# Get-TargetProcesses + 의존 helper 추출
+$tokens = $null
+$errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseInput($src, [ref]$tokens, [ref]$errors)
+if ($errors.Count -gt 0) {
+    Write-Host "스크립트 파싱 실패" -ForegroundColor Red
+    $errors | Format-List
     exit 1
+}
+foreach ($fnName in @('Test-IsClaudeOrphan','Test-IsCodexProcess','Get-DescendantPids','Get-CodexProtectedPids','Get-TargetProcesses')) {
+    $fnAst = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $fnName }, $true)
+    if (-not $fnAst) {
+        Write-Host "함수 추출 실패: $fnName" -ForegroundColor Red
+        exit 1
+    }
+    if ($fnName -eq 'Get-TargetProcesses') { $funcDef = $fnAst.Extent.Text }
+    Invoke-Expression $fnAst.Extent.Text
 }
 
 $targets = Get-TargetProcesses
@@ -72,6 +82,29 @@ if ($null -eq $selfIncluded) {
     Write-Host "[PASS] 자기 자신 제외됨" -ForegroundColor Green
 } else {
     Write-Host "[FAIL] 자기 자신이 대상에 포함됨!" -ForegroundColor Red
+}
+
+Write-Host ""
+Write-Host "== Codex 세션 보존 검증 =="
+if ($funcDef -notmatch '(?i)\bcodex\.exe\b|node_repl\.exe|@openai\\codex|OpenAI\\Codex') {
+    Write-Host "[PASS] Get-TargetProcesses 가 Codex 를 종료 대상으로 수집하지 않음" -ForegroundColor Green
+} else {
+    Write-Host "[FAIL] Get-TargetProcesses 안에 Codex 종료 대상 패턴이 남아 있음" -ForegroundColor Red
+}
+if ($src -match '(?ms)^function\s+Test-IsCodexProcess\b' -and $src -match '(?ms)^function\s+Get-CodexProtectedPids\b' -and $src.Contains('@openai[\\/]codex') -and $src -match 'node_repl') {
+    Write-Host "[PASS] Codex 프로세스/보호 트리 helper 존재" -ForegroundColor Green
+} else {
+    Write-Host "[FAIL] Codex 프로세스/보호 트리 helper 누락" -ForegroundColor Red
+}
+if ($src -match 'Get-DescendantPids -RootPids \$codexPids' -and $src -match 'Codex 세션/부모/자손 보존' -and $src -match 'Codex 자손 보존') {
+    Write-Host "[PASS] Codex 세션의 부모/자손 트리 종료 방지 가드 존재" -ForegroundColor Green
+} else {
+    Write-Host "[FAIL] Codex 보호 트리 가드 누락" -ForegroundColor Red
+}
+if ($src -notmatch '(?im)^\s*\$pid\s*=') {
+    Write-Host "[PASS] PowerShell 자동 변수 `$PID 덮어쓰기 없음" -ForegroundColor Green
+} else {
+    Write-Host "[FAIL] `$pid 할당 발견 — PowerShell 자동 변수 `$PID 와 충돌" -ForegroundColor Red
 }
 
 # v1.1 신규 기능 smoke test
@@ -339,7 +372,7 @@ if ($src -match 'return \$result\.ToArray\(\)' -and $src -notmatch 'return ,\$re
 } else { Write-Host "[WARN] Get-DescendantPids 반환 형태 미확인" -ForegroundColor Yellow }
 
 # IncludeDescendants 시 self / ExcludePids 제외 가드
-if ($src -match 'ProcessId\) -ne \$self' -and $src -match 'ExcludePids -notcontains') {
+if ($src -match '-ne \$self' -and $src -match 'ExcludePids -notcontains') {
     Write-Host "[PASS] 자손 수집 시 self / KeepPids 제외 가드 존재" -ForegroundColor Green
 } else { Write-Host "[WARN] 자손 제외 가드 미확인" -ForegroundColor Yellow }
 
