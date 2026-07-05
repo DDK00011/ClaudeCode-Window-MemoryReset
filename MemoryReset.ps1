@@ -1390,7 +1390,7 @@ function Format-AlertMessage {
     }
     $lines += ""
     $lines += "미리보기: <code>Run-IdleDryRun.bat</code>"
-    $lines += "자동 정리: <code>ClaudeCodeMemoryCleanup</code> 작업이 2시간마다 <code>-IdleOnly</code> 실행"
+    $lines += "자동 정리: <code>ClaudeCodeMemoryCleanup</code> 작업이 3시간마다 <code>-IdleOnly</code> 실행"
     $lines += "즉시 정리: <code>Run-IdleCleanup.bat</code>"
     return ($lines -join "`n")
 }

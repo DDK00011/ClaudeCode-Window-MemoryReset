@@ -4,7 +4,7 @@
     MemoryReset 자동 정리(-IdleOnly)를 Windows 작업 스케줄러에 등록/해제.
 
 .DESCRIPTION
-    IntervalHours(기본 2) 간격으로 -IdleOnly -SkipConfirmation 를 무인(창 숨김) 실행한다.
+    IntervalHours(기본 3) 간격으로 -IdleOnly -SkipConfirmation 를 무인(창 숨김) 실행한다.
     idle(idleMinutes+ 무활동, CPU 율<임계) / orphan(부모 죽음) 프로세스만 종료 → 활성 세션은 보존.
     종료(kill)에는 관리자 권한이 필요하므로 RunLevel Highest 로 등록(로그인 세션에서 UAC 없이 승격).
     등록/해제 자체에도 관리자 권한이 필요하므로 자동으로 UAC 승격한다.
@@ -16,15 +16,15 @@
     작업 해제 (기본은 등록).
 
 .PARAMETER IntervalHours
-    실행 간격(시간). 기본 2.
+    실행 간격(시간). 기본 3.
 
 .EXAMPLE
-    .\Cleanup-Schedule.ps1                 # 2시간 간격 등록
+    .\Cleanup-Schedule.ps1                 # 3시간 간격 등록
     .\Cleanup-Schedule.ps1 -IntervalHours 6
     .\Cleanup-Schedule.ps1 -Remove         # 해제
 #>
 [CmdletBinding()]
-param([switch]$Remove, [int]$IntervalHours = 2)
+param([switch]$Remove, [int]$IntervalHours = 3)
 
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
@@ -64,7 +64,7 @@ if (-not (Test-Path $scriptPath)) {
     Write-Host "[X] MemoryReset.ps1 을 같은 폴더에서 찾을 수 없음: $scriptPath" -ForegroundColor Red
     exit 1
 }
-if ($IntervalHours -lt 1) { $IntervalHours = 2 }
+if ($IntervalHours -lt 1) { $IntervalHours = 3 }
 
 try {
     $argStr   = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$scriptPath`" -IdleOnly -SkipConfirmation -KeepAlive"

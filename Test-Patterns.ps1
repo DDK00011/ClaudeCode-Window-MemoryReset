@@ -313,8 +313,8 @@ foreach ($script in @('Track-Schedule.ps1','Track-Register.bat','Track-Unregiste
 
 # 24. 자동 정리 주기/텔레그램 안내 문구 동기화
 $cleanupSrc = Get-Content (Join-Path $PSScriptRoot 'Cleanup-Schedule.ps1') -Raw
-if ($cleanupSrc -match '\[int\]\$IntervalHours\s*=\s*2' -and $src -match 'ClaudeCodeMemoryCleanup.+2시간마다') {
-    Write-Host "[PASS] 자동 정리 기본 2시간 + 텔레그램 안내 동기화" -ForegroundColor Green
+if ($cleanupSrc -match '\[int\]\$IntervalHours\s*=\s*3' -and $src -match 'ClaudeCodeMemoryCleanup.+3시간마다') {
+    Write-Host "[PASS] 자동 정리 기본 3시간 + 텔레그램 안내 동기화" -ForegroundColor Green
 } else {
     Write-Host "[FAIL] 자동 정리 주기와 텔레그램 안내 문구 불일치" -ForegroundColor Red
 }

@@ -82,7 +82,7 @@ try {
     Write-Host "[OK] 추적 작업 등록됨: $taskName" -ForegroundColor Green
     Write-Host ("    → {0}분 간격으로 -TrackActivity 무인 실행 (창 숨김)" -f $interval) -ForegroundColor DarkGray
     Write-Host "    → CPU 스냅샷만 기록 + 임계 초과 시 텔레그램 알림. 프로세스 종료는 자동 정리/수동 정리가 담당." -ForegroundColor DarkGray
-    Write-Host "    → 자동 정리: Cleanup-Schedule.ps1 (기본 2시간). 즉시 정리: Run-IdleDryRun.bat → Run-IdleCleanup.bat" -ForegroundColor DarkGray
+    Write-Host "    → 자동 정리: Cleanup-Schedule.ps1 (기본 3시간). 즉시 정리: Run-IdleDryRun.bat → Run-IdleCleanup.bat" -ForegroundColor DarkGray
     Write-Host "    → 해제: Track-Unregister.bat" -ForegroundColor DarkGray
 } catch {
     Write-Host "[X] 작업 등록 실패: $($_.Exception.Message)" -ForegroundColor Red

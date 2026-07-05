@@ -197,12 +197,12 @@ Track-Register.bat            :: 작업 스케줄러에 -TrackActivity 등록 (U
 Track-Unregister.bat          :: 해제
 ```
 
-**2) 임계 초과 시 텔레그램 알림**: `tracker-settings.json` 에 봇 토큰/chat_id 를 넣으면, idle/orphan 프로세스가 임계(개수/메모리/RAM%)를 넘을 때 텔레그램으로 알림이 옵니다. 알림 tick 자체는 종료하지 않고, 등록된 자동 정리 작업이 2시간마다 `-IdleOnly` 로 처리합니다.
+**2) 임계 초과 시 텔레그램 알림**: `tracker-settings.json` 에 봇 토큰/chat_id 를 넣으면, idle/orphan 프로세스가 임계(개수/메모리/RAM%)를 넘을 때 텔레그램으로 알림이 옵니다. 알림 tick 자체는 종료하지 않고, 등록된 자동 정리 작업이 3시간마다 `-IdleOnly` 로 처리합니다.
 
 **3) 자동 정리 등록 / 즉시 정리**:
 
 ```cmd
-Cleanup-Schedule.ps1          :: 2시간마다 -IdleOnly 자동 정리 등록
+Cleanup-Schedule.ps1          :: 3시간마다 -IdleOnly 자동 정리 등록
 Run-IdleDryRun.bat            :: idle/orphan 정리 대상 미리보기 (종료 없음)
 Run-IdleCleanup.bat           :: 실제 종료 + 메모리 회수
 ```
