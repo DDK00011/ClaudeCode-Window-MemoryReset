@@ -9,13 +9,23 @@ if (-not (Test-Path $mainScript)) {
     exit 1
 }
 $src = Get-Content $mainScript -Raw -Encoding UTF8
-# Extract Get-TargetProcesses function (regex)
-if ($src -match '(?ms)function Get-TargetProcesses \{.*?^\}') {
-    $funcDef = $Matches[0]
-    Invoke-Expression $funcDef
-} else {
-    Write-Host "Function extraction failed" -ForegroundColor Red
+# Get-TargetProcesses + dependent helper extraction
+$tokens = $null
+$errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseInput($src, [ref]$tokens, [ref]$errors)
+if ($errors.Count -gt 0) {
+    Write-Host "Script parsing failed" -ForegroundColor Red
+    $errors | Format-List
     exit 1
+}
+foreach ($fnName in @('Test-IsClaudeOrphan','Test-IsCodexProcess','Get-DescendantPids','Get-CodexProtectedPids','Get-TargetProcesses')) {
+    $fnAst = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $fnName }, $true)
+    if (-not $fnAst) {
+        Write-Host "Function extraction failed: $fnName" -ForegroundColor Red
+        exit 1
+    }
+    if ($fnName -eq 'Get-TargetProcesses') { $funcDef = $fnAst.Extent.Text }
+    Invoke-Expression $fnAst.Extent.Text
 }
 
 $targets = Get-TargetProcesses
@@ -72,6 +82,29 @@ if ($null -eq $selfIncluded) {
     Write-Host "[PASS] Self excluded" -ForegroundColor Green
 } else {
     Write-Host "[FAIL] Self is included in targets!" -ForegroundColor Red
+}
+
+Write-Host ""
+Write-Host "== Codex session preservation verification =="
+if ($funcDef -notmatch '(?i)\bcodex\.exe\b|node_repl\.exe|@openai\\codex|OpenAI\\Codex') {
+    Write-Host "[PASS] Get-TargetProcesses does not collect Codex as a termination target" -ForegroundColor Green
+} else {
+    Write-Host "[FAIL] Codex termination target patterns remain in Get-TargetProcesses" -ForegroundColor Red
+}
+if ($src -match '(?ms)^function\s+Test-IsCodexProcess\b' -and $src -match '(?ms)^function\s+Get-CodexProtectedPids\b' -and $src.Contains('@openai[\\/]codex') -and $src -match 'node_repl') {
+    Write-Host "[PASS] Codex process/protected tree helper exists" -ForegroundColor Green
+} else {
+    Write-Host "[FAIL] Codex process/protected tree helper missing" -ForegroundColor Red
+}
+if ($src -match 'Get-DescendantPids -RootPids \$codexPids' -and $src -match 'Codex session/parent/descendant preservation' -and $src -match 'Codex descendant preservation') {
+    Write-Host "[PASS] Codex session parent/descendant tree termination prevention guard exists" -ForegroundColor Green
+} else {
+    Write-Host "[FAIL] Codex protected tree guard missing" -ForegroundColor Red
+}
+if ($src -notmatch '(?im)^\s*\$pid\s*=') {
+    Write-Host "[PASS] PowerShell automatic variable `$PID not overwritten" -ForegroundColor Green
+} else {
+    Write-Host "[FAIL] Found `$pid assignment — conflicts with PowerShell automatic variable `$PID" -ForegroundColor Red
 }
 
 # v1.1 new feature smoke test
@@ -339,7 +372,7 @@ if ($src -match 'return \$result\.ToArray\(\)' -and $src -notmatch 'return ,\$re
 } else { Write-Host "[WARN] Get-DescendantPids return format not verified" -ForegroundColor Yellow }
 
 # IncludeDescendants guards excluding self / ExcludePids
-if ($src -match 'ProcessId\) -ne \$self' -and $src -match 'ExcludePids -notcontains') {
+if ($src -match '-ne \$self' -and $src -match 'ExcludePids -notcontains') {
     Write-Host "[PASS] Descendant collection has self / KeepPids exclusion guards" -ForegroundColor Green
 } else { Write-Host "[WARN] Descendant exclusion guard not verified" -ForegroundColor Yellow }
 

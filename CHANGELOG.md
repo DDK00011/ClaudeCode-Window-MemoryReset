@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- Codex sessions are no longer cleanup targets. Removed the direct `codex.exe` / `node_repl.exe` target collector and added a Codex protection guard so Codex processes, their parent chain, and descendants are excluded from target collection and skipped before any graceful close or `taskkill /T` path.
+
 ## [1.4.1] — 2026-06-14
 
 Byproduct cleanup — terminate the descendant process tree of claude/Antigravity (the conhost/bash/node/pwsh/python "leftovers" a session spawns), plus a one-click full purge.

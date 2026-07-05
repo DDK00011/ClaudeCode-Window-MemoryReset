@@ -387,6 +387,18 @@ function ConvertFrom-KeepPidsString {
     return ,$valid
 }
 
+function Test-IsCodexProcess {
+    param($Proc)
+    if (-not $Proc) { return $false }
+    $exe = if ($Proc.ExecutablePath) { $Proc.ExecutablePath } else { '' }
+    $cmd = if ($Proc.CommandLine)    { $Proc.CommandLine }    else { '' }
+    return (
+        $Proc.Name -match '(?i)^(codex|node_repl)\.exe$' -or
+        $exe -match '(?i)\\(@openai\\codex|OpenAI\\Codex)\\' -or
+        $cmd -match '(?i)@openai[\\/]codex|OpenAI[\\/]Codex'
+    )
+}
+
 # ════════════════════════════════════════════════════════════════════
 # 5. Identify target processes
 #    Core safety guard: never match Claude Desktop app (blacklist for multiple install paths).
@@ -424,6 +436,30 @@ function Get-DescendantPids {
     return $result.ToArray()
 }
 
+function Get-CodexProtectedPids {
+    param($AllProcs)
+    $codexPids = @($AllProcs | Where-Object { Test-IsCodexProcess $_ } | ForEach-Object { [int]$_.ProcessId })
+    if ($codexPids.Count -eq 0) { return ,@() }
+
+    $byPid = @{}
+    foreach ($ap in $AllProcs) { $byPid[[int]$ap.ProcessId] = $ap }
+    $protected = @{}
+
+    foreach ($cpid in $codexPids) {
+        $cur = $byPid[[int]$cpid]
+        while ($cur) {
+            $procId = [int]$cur.ProcessId
+            if ($protected.ContainsKey($procId)) { break }
+            $protected[$procId] = $true
+            $cur = $byPid[[int]$cur.ParentProcessId]
+        }
+    }
+    foreach ($dpid in @(Get-DescendantPids -RootPids $codexPids -AllProcs $AllProcs)) {
+        $protected[[int]$dpid] = $true
+    }
+    return @($protected.Keys | ForEach-Object { [int]$_ })
+}
+
 function Get-TargetProcesses {
     # reason: whitelist matching + blacklist + integrated filter — over 30 lines unavoidable.
     # Splitting scatters matching rules across 2 places, increasing maintenance cost ↑.
@@ -433,6 +469,7 @@ function Get-TargetProcesses {
         [switch]$IncludeDescendants
     )
     $allProcs = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue
+    $codexProtectedPids = @(Get-CodexProtectedPids -AllProcs $allProcs)
 
     # ── Identify Claude Code CLI ──
     # Whitelist(install paths) based: only target claude.exe/node.exe run from locations below.
@@ -490,23 +527,14 @@ function Get-TargetProcesses {
         ($_.Name -match '(?i)^Antigravity(\.exe)?$' -and $_.ExecutablePath -match '(?i)Antigravity')
     }
 
-    # ── Identify Codex CLI ──
-    # OpenAI Codex CLI. Whitelist (installation paths) anchored.
-    #   1) codex.exe    : ...\@openai\codex\...\codex.exe (WinGet npm) or ...\OpenAI\Codex\...
-    #   2) node_repl.exe: %LOCALAPPDATA%\OpenAI\Codex\runtimes\...\node_repl.exe (runtime for Codex only)
-    # pwsh/node byproducts from codex spawn are not caught by name here (generic shell false-positive risk) —
-    # When root (codex.exe/node_repl.exe) terminates, child tree is cleaned up with taskkill /T.
-    $codex = $allProcs | Where-Object {
-        $exe = if ($_.ExecutablePath) { $_.ExecutablePath } else { '' }
-        ($_.Name -match '(?i)^codex\.exe$'     -and $exe -match '(?i)\\(@openai\\codex|OpenAI\\Codex)\\') -or
-        ($_.Name -match '(?i)^node_repl\.exe$' -and $exe -match '(?i)\\OpenAI\\Codex\\')
-    }
-
     # Deduplicate + exclude self (current PowerShell)
     $self = $PID
-    $merged = @($claude) + @($antigravity) + @($codex) |
+    $merged = @($claude) + @($antigravity) |
         Where-Object { $_.ProcessId -ne $self } |
         Sort-Object ProcessId -Unique
+    if ($codexProtectedPids.Count -gt 0) {
+        $merged = $merged | Where-Object { $codexProtectedPids -notcontains [int]$_.ProcessId }
+    }
 
     # v1.3: -ExcludePids — exclude user-specified PIDs from termination targets (preserve active sessions)
     if ($ExcludePids.Count -gt 0) {
@@ -517,7 +545,7 @@ function Get-TargetProcesses {
     # Antigravity main app (.exe itself) is the IDE, so orphan concept does not apply → excluded in OnlyOrphans mode for safety.
     if ($OnlyOrphans) {
         $merged = $merged | Where-Object {
-            $_.Name -match '(?i)^(claude|node|codex|node_repl)\.exe$' -and (Test-IsClaudeOrphan -ClaudeProc $_ -AllProcs $allProcs)
+            $_.Name -match '(?i)^(claude|node)\.exe$' -and (Test-IsClaudeOrphan -ClaudeProc $_ -AllProcs $allProcs)
         }
     }
 
@@ -532,7 +560,8 @@ function Get-TargetProcesses {
                 $descProcs = $allProcs | Where-Object {
                     ($descPids -contains [int]$_.ProcessId) -and
                     ([int]$_.ProcessId -ne $self) -and
-                    ($ExcludePids.Count -eq 0 -or $ExcludePids -notcontains $_.ProcessId)
+                    ($ExcludePids.Count -eq 0 -or $ExcludePids -notcontains $_.ProcessId) -and
+                    ($codexProtectedPids -notcontains [int]$_.ProcessId)
                 }
                 $merged = @($merged) + @($descProcs) | Sort-Object ProcessId -Unique
             }
@@ -555,6 +584,22 @@ function Stop-TargetProcesses {
     if ($Processes.Count -eq 0) {
         Write-Host "[i] No target processes to terminate." -ForegroundColor DarkGray
         return
+    }
+
+    $allProcs = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
+    $protectedCodexPids = @(Get-CodexProtectedPids -AllProcs $allProcs)
+    if ($protectedCodexPids.Count -gt 0) {
+        $Processes = @($Processes | Where-Object {
+            if ($protectedCodexPids -contains [int]$_.ProcessId) {
+                Write-Host " [SKIP] Preserve Codex session/parent/descendant → $($_.Name) (PID=$($_.ProcessId))" -ForegroundColor Green
+                return $false
+            }
+            return $true
+        })
+        if ($Processes.Count -eq 0) {
+            Write-Host "[i] No target processes to terminate after preserving Codex." -ForegroundColor DarkGray
+            return
+        }
     }
 
     Write-Host ""
@@ -604,7 +649,14 @@ function Stop-TargetProcesses {
 
     foreach ($p in $survivors) {
         $tag = "$($p.Name) (PID=$($p.ProcessId))"
-        $null = & taskkill.exe /F /T /PID $p.ProcessId 2>&1
+        $descPids = @(Get-DescendantPids -RootPids @([int]$p.ProcessId) -AllProcs $allProcs)
+        $hasCodexChild = @($descPids | Where-Object { $protectedCodexPids -contains [int]$_ }).Count -gt 0
+        if ($hasCodexChild) {
+            Write-Host " [SKIP] $tag (preserve Codex descendants)" -ForegroundColor Green
+            continue
+        } else {
+            $null = & taskkill.exe /F /T /PID $p.ProcessId 2>&1
+        }
         # 0=success, 128=process already gone (cascaded by parent kill) → both OK
         if ($LASTEXITCODE -eq 0) {
             Write-Host " [KILL] $tag" -ForegroundColor Yellow
@@ -701,7 +753,7 @@ function Show-ZombieAnalysis {
 
     $allProcs = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue
     $targets  = @(Get-TargetProcesses)   # v1.3 safety: prevent pipeline unwrap
-    $claudes  = @($targets | Where-Object { $_.Name -match '(?i)^(claude|node|codex|node_repl)\.exe$' })
+    $claudes  = @($targets | Where-Object { $_.Name -match '(?i)^(claude|node)\.exe$' })
 
     if ($claudes.Count -eq 0) {
         Write-Host " (No claude.exe / node.exe processes to analyze)" -ForegroundColor DarkGray
@@ -1328,7 +1380,7 @@ function Get-ReclaimCandidates {
     foreach ($t in $targets) {
         $entry    = $state.processes["$([int]$t.ProcessId)"]
         $isIdle   = Test-ProcessIdle -Entry $entry -Settings $Settings -Now $now
-        $isOrphan = ($t.Name -match '(?i)^(claude|node|codex|node_repl)\.exe$') -and (Test-IsClaudeOrphan -ClaudeProc $t -AllProcs $allProcs)
+        $isOrphan = ($t.Name -match '(?i)^(claude|node)\.exe$') -and (Test-IsClaudeOrphan -ClaudeProc $t -AllProcs $allProcs)
         if ($isIdle -or $isOrphan) {
             $idleMin = $null
             if ($entry -and $entry.lastActiveAt) {
