@@ -311,6 +311,14 @@ foreach ($script in @('Track-Schedule.ps1','Track-Register.bat','Track-Unregiste
     }
 }
 
+# 24. Sync auto cleanup interval/Telegram notice text
+$cleanupSrc = Get-Content (Join-Path $PSScriptRoot 'Cleanup-Schedule.ps1') -Raw
+if ($cleanupSrc -match '\[int\]\$IntervalHours\s*=\s*2' -and $src -match 'ClaudeCodeMemoryCleanup.+2 hours') {
+    Write-Host "[PASS] Auto cleanup default 2 hours + Telegram guidance synchronized" -ForegroundColor Green
+} else {
+    Write-Host "[FAIL] Auto cleanup interval and Telegram guidance text mismatch" -ForegroundColor Red
+}
+
 # ════════════════════════════════════════════════════════════════════
 # v1.4.1 Byproduct(descendant tree) cleanup smoke test
 # ════════════════════════════════════════════════════════════════════
