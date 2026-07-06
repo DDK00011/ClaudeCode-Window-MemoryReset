@@ -1,7 +1,7 @@
 @echo off
 :: ════════════════════════════════════════════════════════════════════
 ::  One-click full cleanup (reboot feel) — UAC elevation
-::  All claude / Antigravity + descendant tree(conhost/bash/node/pwsh/python/cmd etc
+::  All claude / Codex CLI + descendant tree(conhost/bash/node/pwsh/python/cmd etc
 ::  session-launched "byproducts") are terminated, then deep memory recovery is performed:
 ::    empty working set + trim file cache + Memory Compression flush + standby purge.
 ::

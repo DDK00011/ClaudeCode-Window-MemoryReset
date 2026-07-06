@@ -1,14 +1,14 @@
 ﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
-    Safely terminates Claude Code and Antigravity and recovers Windows RAM.
+    Safely terminates Claude Code / Codex CLI byproducts and recovers Windows RAM.
 
 .DESCRIPTION
     Windows does not immediately return memory from terminated processes to the free list and
     tends to retain it in the Standby List / File Cache and slows available memory recovery.
     This script increases recovery rate through the following 5 steps.
 
-      1) Gracefully terminate Claude Code / Antigravity processes (CloseMainWindow)
+      1) Gracefully terminate Claude Code / Codex CLI processes (CloseMainWindow)
       2) Force-kill the remaining process tree after timeout (taskkill /T /F)
       3) Empty Working Set for all remaining processes (EmptyWorkingSet, PROCESS_SET_QUOTA)
       4) System File Cache trim (SetSystemFileCacheSize)
@@ -93,7 +93,7 @@ param(
     # v1.4 added ─────────────────────────────────────────────
     [switch]$TrackActivity,  # background tracking 1-tick: record CPU snapshot + Telegram alert if threshold exceeded. Does not terminate, no UAC required.
     [switch]$IdleOnly,       # only idle(idleMinutes+ inactivity) / orphan processes are cleanup targets (preserve active sessions)
-    [switch]$IncludeDescendants  # Also terminate descendant tree (conhost/bash/node/pwsh/python and other byproducts) of target claude/Antigravity
+    [switch]$IncludeDescendants  # also terminate descendants of target claude/Codex CLI (byproducts such as conhost/bash/node/pwsh/python)
 )
 
 $ErrorActionPreference = 'Continue'
@@ -402,13 +402,13 @@ function Test-IsCodexProcess {
 # ════════════════════════════════════════════════════════════════════
 # 5. Identify target processes
 #    Core safety guard: never match Claude Desktop app (blacklist for multiple install paths).
-#    Only CLI / Antigravity extensions / standard Node packages are termination targets.
+#    Only IDE extension/terminal CLI and standard Node packages are termination targets.
 #    v1.3: preserve with -ExcludePids, select only orphans with -OnlyOrphans.
 #    v1.4: include descendant tree (byproducts spawned by claude) in termination targets with -IncludeDescendants.
 # ════════════════════════════════════════════════════════════════════
 function Get-DescendantPids {
     # Collect all descendant PIDs of RootPids with BFS (process tree walk). Based on snapshot($AllProcs).
-    # Used to identify "byproducts" such as conhost/bash/node/pwsh/python spawned by claude/Antigravity.
+    # Used to identify "byproducts" that claude/Codex CLI spawn, such as conhost/bash/node/pwsh/python.
     param([int[]]$RootPids, $AllProcs)
     $childMap = @{}
     foreach ($pr in $AllProcs) {
@@ -535,15 +535,6 @@ function Get-TargetProcesses {
         ($_.Name -eq 'node.exe' -and $cmd -match '(?i)@anthropic-ai[\\/]claude-code')
     }
 
-    # ── Antigravity identification ──
-    # Exact installation path: %LOCALAPPDATA%\Programs\Antigravity\Antigravity.exe
-    # ExecutablePath is safest (includes every helper/renderer).
-    $antigravity = $allProcs | Where-Object {
-        ($_.ExecutablePath -match '(?i)\\Programs\\Antigravity\\') -or
-        ($_.ExecutablePath -match '(?i)\\Google\\Antigravity\\') -or
-        ($_.Name -match '(?i)^Antigravity(\.exe)?$' -and $_.ExecutablePath -match '(?i)Antigravity')
-    }
-
     # ── Identify Codex CLI ──
     # Include in cleanup targets, but preserve if "in progress" by activity tracking status before actual termination.
     $codexRootPids = @(Get-CodexRootPids -AllProcs $allProcs)
@@ -551,7 +542,7 @@ function Get-TargetProcesses {
 
     # Deduplicate + exclude self (current PowerShell)
     $self = $PID
-    $merged = @($claude) + @($antigravity) + @($codex) |
+    $merged = @($claude) + @($codex) |
         Where-Object { $_.ProcessId -ne $self } |
         Sort-Object ProcessId -Unique
 
@@ -561,7 +552,6 @@ function Get-TargetProcesses {
     }
 
     # v1.3: -OnlyOrphans — retain only claude.exe/node.exe where IDE extension host has died.
-    # Antigravity main app (.exe itself) is the IDE, so orphan concept does not apply → excluded in OnlyOrphans mode for safety.
     if ($OnlyOrphans) {
         $merged = $merged | Where-Object {
             (-not (Test-IsCodexProcess $_)) -and
@@ -940,7 +930,7 @@ function Show-MemoryDiagnostics {
 
     # 4. Count of processes to terminate (actual recoverable amount preview)
     Write-Host ""
-    Write-Host "── Target processes to terminate (Claude/Antigravity) ──" -ForegroundColor Cyan
+    Write-Host "── Processes to terminate (Claude/Codex CLI) ──" -ForegroundColor Cyan
     $targets = @(Get-TargetProcesses)   # v1.3 safety: prevent pipeline unwrap
     if ($targets.Count -eq 0) {
         Write-Host " (none)" -ForegroundColor DarkGray
@@ -1611,7 +1601,7 @@ function Invoke-ActivityTracking {
 # ════════════════════════════════════════════════════════════════════
 # 8. Main
 # ════════════════════════════════════════════════════════════════════
-try { $Host.UI.RawUI.WindowTitle = 'Memory Reset — Claude Code & Antigravity' } catch {}
+try { $Host.UI.RawUI.WindowTitle = 'Memory Reset — Claude/Codex CLI Cleanup' } catch {}
 
 # Start runtime measurement
 $script:startTime = Get-Date
@@ -1634,7 +1624,7 @@ Write-RunLog ("=== run start modes={0} admin={1} script={2}" -f ($runModes -join
 
 Clear-Host
 Write-Host "╔══════════════════════════════════════════════════════════╗" -ForegroundColor Cyan
-Write-Host "║      Memory Reset  —  Claude Code & Antigravity          ║" -ForegroundColor Cyan
+Write-Host "║      Memory Reset  —  Claude/Codex CLI Cleanup           ║" -ForegroundColor Cyan
 Write-Host "║      (graceful kill + working-set + standby purge)       ║" -ForegroundColor Cyan
 Write-Host "╚══════════════════════════════════════════════════════════╝" -ForegroundColor Cyan
 
@@ -1674,10 +1664,9 @@ if ($excludePidsArray.Count -gt 0) {
 
 Write-Host ""
 Write-Host "── Processes to terminate ──" -ForegroundColor Cyan
-if ($IncludeDescendants) { Write-Host "[i] INCLUDE-DESCENDANTS mode — also terminate descendant tree (conhost/bash/node/pwsh/python byproducts) of claude/Antigravity" -ForegroundColor Magenta }
+if ($IncludeDescendants) { Write-Host "[i] INCLUDE-DESCENDANTS mode — claude/Codex CLI descendant tree(conhost/bash/node/pwsh/python byproducts) also terminated" -ForegroundColor Magenta }
 $categorize = {
     param($p)
-    if ($p.ExecutablePath -match '(?i)\\Programs\\Antigravity\\')                              { return 'Antigravity' }
     if ($p.ExecutablePath -match '(?i)\\\.antigravity\\extensions')                            { return 'Claude(Antigravity ext)' }
     if ($p.ExecutablePath -match '(?i)\\\.cursor\\extensions')                                 { return 'Claude(Cursor ext)' }
     if ($p.ExecutablePath -match '(?i)\\\.vscode\\extensions')                                 { return 'Claude(VS Code ext)' }

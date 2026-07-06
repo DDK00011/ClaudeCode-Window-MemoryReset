@@ -32,8 +32,7 @@ $targets = Get-TargetProcesses
 
 Write-Host "== Termination target classification =="
 $targets | Group-Object {
-    if ($_.ExecutablePath -match '(?i)\\Programs\\Antigravity\\') { 'Antigravity main app' }
-    elseif ($_.ExecutablePath -match '(?i)\\\.antigravity\\extensions') { 'Claude CLI (Antigravity extension)' }
+    if ($_.ExecutablePath -match '(?i)\\\.antigravity\\extensions') { 'Claude CLI (Antigravity extension)' }
     elseif ($_.ExecutablePath -match '(?i)\\Claude\\claude-code\\') { 'Claude CLI (standalone)' }
     elseif (Test-IsCodexProcess $_) { 'Codex CLI' }
     elseif ($_.Name -eq 'node.exe') { 'Claude CLI (node)' }
@@ -58,6 +57,21 @@ if (@($inTargets).Count -eq 0) {
 }
 
 Write-Host ""
+Write-Host "== GUI IDE preservation verification =="
+$guiInTargets = $targets | Where-Object {
+    $_.Name -match '(?i)^(Antigravity|Code|Cursor|Windsurf)\.exe$' -or
+    $_.ExecutablePath -match '(?i)\\Programs\\Antigravity\\|\\Google\\Antigravity\\|\\Microsoft VS Code\\|\\Programs\\Microsoft VS Code\\'
+}
+'GUI IDE termination target count: {0}' -f @($guiInTargets).Count
+if (@($guiInTargets).Count -eq 0 -and
+    $funcDef -notmatch '(?i)\\Programs\\Antigravity\\|\\Google\\Antigravity\\|Antigravity\(\\.exe\)\?') {
+    Write-Host "[PASS] Antigravity/VS Code GUI IDEs are excluded from termination targets" -ForegroundColor Green
+} else {
+    Write-Host "[FAIL] GUI IDE is included in termination targets or Antigravity app match remains" -ForegroundColor Red
+    $guiInTargets | Select-Object Name, ProcessId, ExecutablePath | Format-List
+}
+
+Write-Host ""
 Write-Host "== Total =="
 $totalMB = [math]::Round((($targets | Measure-Object WorkingSetSize -Sum).Sum / 1MB), 1)
 'Recoverable on termination (working set basis): {0:N1} MB ({1} processes)' -f $totalMB, @($targets).Count
@@ -65,7 +79,6 @@ $totalMB = [math]::Round((($targets | Measure-Object WorkingSetSize -Sum).Sum / 
 Write-Host ""
 Write-Host "== 'Other' category details (check unexpected matches) =="
 $unknown = $targets | Where-Object {
-    $_.ExecutablePath -notmatch '(?i)\\Programs\\Antigravity\\' -and
     $_.ExecutablePath -notmatch '(?i)\\\.antigravity\\extensions' -and
     $_.ExecutablePath -notmatch '(?i)\\Claude\\claude-code\\' -and
     -not (Test-IsCodexProcess $_) -and

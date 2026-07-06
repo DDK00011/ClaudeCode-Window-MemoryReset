@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Main cleanup runs now append `memoryreset.log` entries for run mode, selected targets, idle/orphan reason, Codex guard skips, `CloseMainWindow`, `taskkill`, and recovery summary so hidden scheduled cleanup is auditable after the fact.
 
 ### Fixed
+- Antigravity GUI processes are no longer cleanup targets. MemoryReset now targets only Claude/Codex CLI work processes and their descendants, while GUI IDE hosts such as Antigravity and VS Code remain out of scope.
 - Codex cleanup is now activity-based instead of blanket-blocked. Codex CLI roots are cleanup targets again, but active/unknown Codex process trees are skipped before `CloseMainWindow` or `taskkill /T`; only sessions proven idle by tracking history are reclaim candidates.
 - Codex activity tracking now aggregates CPU across the Codex process tree, so work happening in child `node_repl.exe`, `pwsh.exe`, `cmd.exe`, or tool processes refreshes `lastActiveAt`.
 - I/O counters are kept as diagnostics only and no longer refresh `lastActiveAt`; sleep/resume or background IPC can no longer make completed idle Codex sessions immortal. Legacy I/O-refreshed state is corrected once when CPU was below threshold.

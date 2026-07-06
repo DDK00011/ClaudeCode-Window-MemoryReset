@@ -1,7 +1,7 @@
 ﻿# MemoryReset
 
 > A PowerShell script that recovers available Windows RAM **without rebooting**.
-> Claude Code and Antigravity (Google's VS Code fork) safely clear multi-session usage.
+> Safely clears remaining memory usage from Claude Code / Codex task processes that GUI IDEs such as Antigravity / VS Code launch through extensions·terminals.
 
 ---
 
@@ -14,8 +14,8 @@
 
 | Measurement point | Memory usage | Situation |
 |-----------|---------------|------|
-| Before running | **95%** | Antigravity 32 + Claude CLI 67 + helpers = 101 processes, ~39 GB in use |
-| After running | **31%** | Antigravity and Claude CLI fully terminated + Standby/File Cache reclaimed |
+| Before running | **95%** | Claude/Codex CLI + helpers = 100+ processes, ~39 GB used |
+| After running | **31%** | Completed CLI task processes terminated + Standby/File Cache recovered |
 | **Amount recovered** | **−64%p (~40 GB)** | Without rebooting, without affecting other apps (browser·messengers, etc.) |
 
 > **Test environment**: Windows 10 LTSC 2021 (build 19044, based on 21H2) · DDR4 64 GB RAM
@@ -33,7 +33,7 @@
 
 | Stage | Action | API |
 |------|------|-----|
-| 1 | Graceful exit of Claude CLI / Antigravity | `CloseMainWindow()` + wait |
+| 1 | Claude/Codex CLI graceful exit | `CloseMainWindow()` + wait |
 | 2 | remaining process tree force-kill | `taskkill /F /T` |
 | 3 | Empty Working Set of all processes | `EmptyWorkingSet` (psapi) |
 | 4 | Trim System File Cache | `SetSystemFileCacheSize(-1, -1, 0)` |
@@ -121,12 +121,9 @@ Or directly in PowerShell:
 - `claude.exe` with the `--output-format stream-json` argument
 - `node.exe` with `@anthropic-ai/claude-code` in the command line
 
-**Antigravity** (all `*.exe` in the following paths):
-- `%LOCALAPPDATA%\Programs\Antigravity\`
-- `%LOCALAPPDATA%\Google\Antigravity\`
-- → Electron GPU/Renderer/Utility helpers and language servers included automatically
-
-**Never terminate** (Claude Desktop app):
+**Never terminate** (GUI apps):
+- `Antigravity.exe` and GUI helper under `%LOCALAPPDATA%\Programs\Antigravity\` / `%LOCALAPPDATA%\Google\Antigravity\`
+- IDE hosts such as `Code.exe` / Cursor / Windsurf
 - `\WindowsApps\Claude_*` (MSIX install)
 - `\AnthropicClaude\app-*\Claude.exe` (Squirrel install)
 - `\Programs\claude-desktop\*\Claude.exe` (direct install)
@@ -144,7 +141,7 @@ Or directly in PowerShell:
 |------|-------------|
 | `NTSTATUS=0xC0000061` (Standby Purge) | Missing `SeProfileSingleProcessPrivilege` → check local security policy (`secpol.msc` → Local Policies → User Rights Assignment) |
 | `NTSTATUS=0xC0000022` | Not elevated to administrator privileges → re-approve UAC |
-| Low recovery amount | Other apps besides Antigravity / Claude Code are in use → check processes in use with `Run-DryRun.bat` |
+| Low recovery amount | Other apps besides Claude/Codex CLI are holding memory → check holding processes with `Run-DryRun.bat` |
 | Garbled non-ASCII characters | Switch the console font to a Unicode font such as `Consolas` / `Cascadia Mono` |
 | Script does not launch | File is blocked — right-click file → Properties → check "Unblock" |
 
@@ -174,7 +171,7 @@ Automatically recorded in `recovery-history.csv` on every recovery run:
 | BeforeFreeMB / AfterFreeMB | Available MB before/after recovery |
 | RecoveredMB | Recovery amount (may be negative — when other apps are holding memory) |
 | BeforePctFree / AfterPctFree | Available % before/after recovery |
-| ProcessesKilled | Number of terminated Claude/Antigravity processes |
+| ProcessesKilled | Number of terminated Claude/Codex CLI processes |
 | RuntimeSec | Execution duration |
 
 Open from the system tray menu → "View recovery history" in Excel/Notepad. You can make a data-based decision on which mode is most effective on your system.
@@ -219,10 +216,10 @@ Run-IdleCleanup.bat           :: Actual termination + memory recovery
 ## One-click full cleanup (including byproducts) [v1.4.1+]
 
 ```cmd
-Run-PurgeAll.bat              :: terminate all claude/Antigravity + descendant byproducts + standby purge
+Run-PurgeAll.bat              :: Terminate all claude/Codex CLI + descendant byproducts + standby purge
 ```
 
-`-IncludeDescendants` also terminates the **descendant process tree**(byproducts such as `conhost`·`bash`·`node`·`pwsh`·`python`·`cmd` launched by the session) of target claude/Antigravity processes. `Run-PurgeAll.bat` adds deep recovery(`-Deep`: working set + file cache + Memory Compression flush + standby purge) to perform **cleanup close to a reboot** at once.
+`-IncludeDescendants` also terminates the **descendant process tree**(byproducts such as `conhost`·`bash`·`node`·`pwsh`·`python`·`cmd` launched by the session) for target claude/Codex CLI processes. `Run-PurgeAll.bat` adds deep recovery(`-Deep`: working set + file cache + Memory Compression flush + standby purge) to perform a **near-reboot cleanup** all at once.
 
 > Shells launched directly by the user are not claude descendants, so they are **not touched**. To preserve a specific session, use with `-Interactive` or `-KeepPids "PID"`, and descendants of preserved sessions are automatically excluded (because preserved claude is not the tree root).
 >
