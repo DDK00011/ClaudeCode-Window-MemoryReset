@@ -266,6 +266,13 @@ if ($src -match '(?ms)^function\s+Write-RecoveryLog\b') {
     Write-Host "[FAIL] Write-RecoveryLog 함수 누락" -ForegroundColor Red
 }
 
+# 8-1. hidden scheduled task 실행 추적용 메인 로그
+if ($src -match '(?ms)^function\s+Write-RunLog\b' -and $src -match 'memoryreset\.log' -and $src -match 'target: pid=' -and $src -match 'taskkill-ok') {
+    Write-Host "[PASS] 메인 실행 파일 로그 존재: memoryreset.log 대상/종료 결과 기록" -ForegroundColor Green
+} else {
+    Write-Host "[FAIL] 메인 실행 로그 누락 — scheduled cleanup 원인 추적 어려움" -ForegroundColor Red
+}
+
 # 9. CSV 락/재시도 가드
 if ($src -match 'maxRetry\s*=\s*3' -and $src -match 'fallback') {
     Write-Host "[PASS] CSV 파일 락 재시도 + fallback 가드 존재" -ForegroundColor Green

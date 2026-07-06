@@ -594,6 +594,17 @@ function Get-TargetProcesses {
 # ════════════════════════════════════════════════════════════════════
 # 6. 프로세스 종료 (Graceful → Wait → Force tree-kill)
 # ════════════════════════════════════════════════════════════════════
+function Write-RunLog {
+    param([string]$Message)
+    try {
+        # ponytail: append-only log; add rotation if memoryreset.log grows enough to matter.
+        $line = "[{0}] PID={1} {2}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $PID, $Message
+        Add-Content -Path (Join-Path $PSScriptRoot 'memoryreset.log') -Value $line -Encoding UTF8 -ErrorAction Stop
+    } catch {
+        # 로그 기록 실패가 정리/회수 자체를 막아서는 안 됨.
+    }
+}
+
 function Stop-TargetProcesses {
     param(
         [array]$Processes,
@@ -603,43 +614,55 @@ function Stop-TargetProcesses {
 
     if ($Processes.Count -eq 0) {
         Write-Host "[i] 종료할 대상 프로세스가 없습니다." -ForegroundColor DarkGray
+        Write-RunLog "stop: no target processes"
         return
     }
 
+    Write-RunLog ("stop: start targets={0} dryRun={1} timeoutSec={2}" -f $Processes.Count, [bool]$DryRun, $TimeoutSec)
     $allProcs = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
     $codexSettings = Get-TrackerSettings
     $codexState = Update-ActivityState -Settings $codexSettings
     $activeCodexPids = @(Get-ActiveCodexProtectedPids -AllProcs $allProcs -State $codexState -Settings $codexSettings -Now (Get-Date))
+    Write-RunLog ("stop: activeCodexProtected={0}" -f $activeCodexPids.Count)
     if ($activeCodexPids.Count -gt 0) {
         $Processes = @($Processes | Where-Object {
             $procId = [int]$_.ProcessId
             if ($activeCodexPids -contains $procId) {
                 Write-Host " [SKIP] 진행 중인 Codex 세션 보존 → $($_.Name) (PID=$($_.ProcessId))" -ForegroundColor Green
+                Write-RunLog ("skip: active-codex pid={0} name={1}" -f $_.ProcessId, $_.Name)
                 return $false
             }
             $descPids = @(Get-DescendantPids -RootPids @($procId) -AllProcs $allProcs)
             $hasCodexChild = @($descPids | Where-Object { $activeCodexPids -contains [int]$_ }).Count -gt 0
             if ($hasCodexChild) {
                 Write-Host " [SKIP] 진행 중인 Codex 자손 보존 → $($_.Name) (PID=$($_.ProcessId))" -ForegroundColor Green
+                Write-RunLog ("skip: active-codex-descendant pid={0} name={1}" -f $_.ProcessId, $_.Name)
                 return $false
             }
             return $true
         })
+        Write-RunLog ("stop: targetsAfterCodexGuard={0}" -f $Processes.Count)
         if ($Processes.Count -eq 0) {
             Write-Host "[i] Codex 보존 후 종료할 대상 프로세스가 없습니다." -ForegroundColor DarkGray
+            Write-RunLog "stop: all targets skipped by Codex guard"
             return
         }
     }
 
     Write-Host ""
     Write-Host "── [1/4] Graceful 종료 시도 (CloseMainWindow) ──" -ForegroundColor Cyan
+    Write-RunLog "stop: graceful close phase"
     foreach ($p in $Processes) {
         $proc = Get-Process -Id $p.ProcessId -ErrorAction SilentlyContinue
-        if (-not $proc) { continue }
+        if (-not $proc) {
+            Write-RunLog ("gone-before-close pid={0} name={1}" -f $p.ProcessId, $p.Name)
+            continue
+        }
 
         $tag = "$($p.Name) (PID=$($p.ProcessId))"
         if ($DryRun) {
             Write-Host " [DRY] CloseMainWindow → $tag" -ForegroundColor DarkGray
+            Write-RunLog ("dry-close pid={0} name={1}" -f $p.ProcessId, $p.Name)
             continue
         }
 
@@ -647,18 +670,25 @@ function Stop-TargetProcesses {
             if ($proc.MainWindowHandle -ne [IntPtr]::Zero) {
                 $null = $proc.CloseMainWindow()
                 Write-Host " [OK] CloseMainWindow → $tag" -ForegroundColor Green
+                Write-RunLog ("close-main-window pid={0} name={1}" -f $p.ProcessId, $p.Name)
             } else {
                 Write-Host "  ·   No window     → $tag (다음 단계에서 강제 종료)" -ForegroundColor DarkGray
+                Write-RunLog ("no-window pid={0} name={1}" -f $p.ProcessId, $p.Name)
             }
         } catch {
             Write-Host " [!] Graceful 실패: $tag — $_" -ForegroundColor Yellow
+            Write-RunLog ("close-failed pid={0} name={1} error={2}" -f $p.ProcessId, $p.Name, $_.Exception.Message)
         }
     }
 
-    if ($DryRun) { return }
+    if ($DryRun) {
+        Write-RunLog "stop: dry-run complete"
+        return
+    }
 
     Write-Host ""
     Write-Host "── [2/4] ${TimeoutSec}초 대기 (저장/정리 시간 확보) ──" -ForegroundColor Cyan
+    Write-RunLog ("stop: wait seconds={0}" -f $TimeoutSec)
     for ($i = $TimeoutSec; $i -gt 0; $i--) {
         Write-Host -NoNewline ("`r 남은 시간: {0,2} 초 " -f $i)
         Start-Sleep -Seconds 1
@@ -670,9 +700,11 @@ function Stop-TargetProcesses {
     $survivors = $Processes | Where-Object {
         Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue
     }
+    Write-RunLog ("stop: survivors={0}" -f @($survivors).Count)
 
     if ($survivors.Count -eq 0) {
         Write-Host " [OK] 모든 프로세스가 graceful 종료됨." -ForegroundColor Green
+        Write-RunLog "stop: all processes closed gracefully"
         return
     }
 
@@ -686,6 +718,7 @@ function Stop-TargetProcesses {
         $hasCodexChild = @($descPids | Where-Object { $activeCodexPids -contains [int]$_ }).Count -gt 0
         if ($hasCodexChild) {
             Write-Host " [SKIP] $tag (진행 중인 Codex 자손 보존)" -ForegroundColor Green
+            Write-RunLog ("skip-force: active-codex-descendant pid={0} name={1}" -f $p.ProcessId, $p.Name)
             continue
         } else {
             $null = & taskkill.exe /F /T /PID $p.ProcessId 2>&1
@@ -693,10 +726,13 @@ function Stop-TargetProcesses {
         # 0=success, 128=process already gone (cascaded by parent kill) → both OK
         if ($LASTEXITCODE -eq 0) {
             Write-Host " [KILL] $tag" -ForegroundColor Yellow
+            Write-RunLog ("taskkill-ok pid={0} name={1}" -f $p.ProcessId, $p.Name)
         } elseif ($LASTEXITCODE -eq 128) {
             Write-Host " [GONE] $tag (이미 종료됨)" -ForegroundColor DarkGray
+            Write-RunLog ("taskkill-gone pid={0} name={1}" -f $p.ProcessId, $p.Name)
         } else {
             Write-Host " [X] taskkill 실패: $tag (exit=$LASTEXITCODE)" -ForegroundColor Red
+            Write-RunLog ("taskkill-failed pid={0} name={1} exit={2}" -f $p.ProcessId, $p.Name, $LASTEXITCODE)
         }
     }
 }
@@ -1589,6 +1625,13 @@ if ($TrackActivity) {
     exit 0
 }
 
+$runModes = @()
+foreach ($m in @('DryRun','Diagnose','Deep','IncludeShell','OrphansOnly','Interactive','IdleOnly','IncludeDescendants')) {
+    if ((Get-Variable -Name $m -ValueOnly)) { $runModes += $m }
+}
+if ($runModes.Count -eq 0) { $runModes = @('basic') }
+Write-RunLog ("=== run start modes={0} admin={1} script={2}" -f ($runModes -join ','), (Test-IsAdmin), $PSCommandPath)
+
 Clear-Host
 Write-Host "╔══════════════════════════════════════════════════════════╗" -ForegroundColor Cyan
 Write-Host "║      Memory Reset  —  Claude Code & Antigravity          ║" -ForegroundColor Cyan
@@ -1608,7 +1651,9 @@ if ($Interactive -and $DryRun) {
 
 # Diagnose 모드는 진단만 출력하고 종료
 if ($Diagnose) {
+    Write-RunLog "diagnose: start"
     Show-MemoryDiagnostics
+    Write-RunLog "diagnose: complete"
     if (-not $KeepAlive) {
         Write-Host ""
         Write-Host "[i] 아무 키나 누르면 창이 닫힙니다."
@@ -1624,45 +1669,59 @@ $excludePidsArray = ConvertFrom-KeepPidsString -Csv $KeepPids
 if ($excludePidsArray.Count -gt 0) {
     Write-Host ""
     Write-Host (" [i] 보존 PID ({0}개): {1}" -f $excludePidsArray.Count, ($excludePidsArray -join ', ')) -ForegroundColor Cyan
+    Write-RunLog ("keepPids: count={0} pids={1}" -f $excludePidsArray.Count, ($excludePidsArray -join ','))
 }
 
 Write-Host ""
 Write-Host "── 종료 대상 프로세스 ──" -ForegroundColor Cyan
 if ($IncludeDescendants) { Write-Host "[i] INCLUDE-DESCENDANTS 모드 — claude/Antigravity 자손 트리(conhost/bash/node/pwsh/python 부산물)도 함께 종료" -ForegroundColor Magenta }
+$categorize = {
+    param($p)
+    if ($p.ExecutablePath -match '(?i)\\Programs\\Antigravity\\')                              { return 'Antigravity' }
+    if ($p.ExecutablePath -match '(?i)\\\.antigravity\\extensions')                            { return 'Claude(Antigravity ext)' }
+    if ($p.ExecutablePath -match '(?i)\\\.cursor\\extensions')                                 { return 'Claude(Cursor ext)' }
+    if ($p.ExecutablePath -match '(?i)\\\.vscode\\extensions')                                 { return 'Claude(VS Code ext)' }
+    if ($p.ExecutablePath -match '(?i)\\npm\\node_modules\\@anthropic-ai\\claude-code')        { return 'Claude(npm global)' }
+    if ($p.ExecutablePath -match '(?i)\\Claude\\claude-code\\')                                { return 'Claude(standalone)' }
+    if ($p.ExecutablePath -match '(?i)\\(@openai\\codex|OpenAI\\Codex)\\')                     { return 'Codex' }
+    if ($p.Name -match '(?i)^node_repl\.exe$')                                                 { return 'Codex(runtime)' }
+    if ($p.Name -eq 'node.exe')                                                                { return 'Claude(node)' }
+    return '기타(unknown)'
+}
 $targets = @(Get-TargetProcesses -ExcludePids $excludePidsArray -OnlyOrphans:$OrphansOnly -IncludeDescendants:$IncludeDescendants)
+Write-RunLog ("targets: rawCount={0} includeDescendants={1} orphansOnly={2}" -f $targets.Count, [bool]$IncludeDescendants, [bool]$OrphansOnly)
 
 # v1.4: -IdleOnly — 추적 기반 idle(idleMinutes+ 무활동) / orphan 후보로만 종료 대상 한정.
 #       활성 세션은 idleMinutes 안에 CPU 를 쓰므로 후보에서 제외됨 → 활성 보존.
+$idleCand = @()
 if ($IdleOnly) {
     $idleSettings = Get-TrackerSettings
     $null = Update-ActivityState -Settings $idleSettings
     $idleCand = @(Get-ReclaimCandidates -Settings $idleSettings)
     $idlePids = @($idleCand | ForEach-Object { $_.ProcessId })
     $targets  = @($targets | Where-Object { $idlePids -contains $_.ProcessId })
+    Write-RunLog ("targets: idleCandidates={0} filteredCount={1} idleMinutes={2} cpuThresholdPct={3}" -f $idleCand.Count, $targets.Count, $idleSettings.idleMinutes, $idleSettings.cpuThresholdPct)
     if ($idleCand.Count -eq 0) {
         Write-Host " [i] idle/orphan 후보 없음 — 추적 이력이 idleMinutes 이상 누적되어야 판정됩니다." -ForegroundColor DarkGray
         Write-Host "     (스케줄러로 -TrackActivity 를 돌리고 있는지, 누적 시간이 충분한지 확인하세요.)" -ForegroundColor DarkGray
     }
 }
 
+$reasonByPid = @{}
+foreach ($c in $idleCand) { $reasonByPid[[int]$c.ProcessId] = $c }
+Write-RunLog ("targets: finalCount={0}" -f $targets.Count)
+foreach ($t in ($targets | Sort-Object ProcessId)) {
+    $r = $reasonByPid[[int]$t.ProcessId]
+    $reason = if ($r) { "idle=$($r.IsIdle) orphan=$($r.IsOrphan) idleMin=$($r.IdleMin)" } elseif ($IdleOnly) { "idleOnlyReason=missing" } else { "reason=selected" }
+    $path = if ($t.ExecutablePath) { [string]$t.ExecutablePath } else { '<none>' }
+    $path = $path -replace '[\r\n]', ' '
+    $creation = if ($t.CreationDate) { ([datetime]$t.CreationDate).ToString('o') } else { '' }
+    Write-RunLog ("target: pid={0} ppid={1} name={2} category={3} wsMB={4} creation={5} {6} path={7}" -f $t.ProcessId, $t.ParentProcessId, $t.Name, (& $categorize $t), ([math]::Round($t.WorkingSetSize / 1MB, 1)), $creation, $reason, $path)
+}
+
 if ($targets.Count -eq 0) {
     Write-Host " (대상 없음 — Standby List 정리만 수행됩니다)" -ForegroundColor DarkGray
 } else {
-    # 카테고리별 그룹: Antigravity / Claude Code CLI 분류
-    $categorize = {
-        param($p)
-        if ($p.ExecutablePath -match '(?i)\\Programs\\Antigravity\\')                              { return 'Antigravity' }
-        if ($p.ExecutablePath -match '(?i)\\\.antigravity\\extensions')                            { return 'Claude(Antigravity ext)' }
-        if ($p.ExecutablePath -match '(?i)\\\.cursor\\extensions')                                 { return 'Claude(Cursor ext)' }
-        if ($p.ExecutablePath -match '(?i)\\\.vscode\\extensions')                                 { return 'Claude(VS Code ext)' }
-        if ($p.ExecutablePath -match '(?i)\\npm\\node_modules\\@anthropic-ai\\claude-code')        { return 'Claude(npm global)' }
-        if ($p.ExecutablePath -match '(?i)\\Claude\\claude-code\\')                                { return 'Claude(standalone)' }
-        if ($p.ExecutablePath -match '(?i)\\(@openai\\codex|OpenAI\\Codex)\\')                     { return 'Codex' }
-        if ($p.Name -match '(?i)^node_repl\.exe$')                                                 { return 'Codex(runtime)' }
-        if ($p.Name -eq 'node.exe')                                                                { return 'Claude(node)' }
-        return '기타(unknown)'
-    }
-
     $grouped = $targets | Group-Object { & $categorize $_ } | Sort-Object Name
     $grandTotal = 0
     foreach ($g in $grouped) {
@@ -1708,11 +1767,13 @@ if ($Interactive -and -not $DryRun -and $targets.Count -gt 0) {
     if ($keepInteractive.Count -gt 0) {
         $targets = @($targets | Where-Object { $keepInteractive -notcontains $_.ProcessId })
         Write-Host (" [i] 보존: {0}개 PID — 남은 종료 대상: {1}개" -f $keepInteractive.Count, $targets.Count) -ForegroundColor Green
+        Write-RunLog ("interactive: preserved={0} remaining={1} pids={2}" -f $keepInteractive.Count, $targets.Count, ($keepInteractive -join ','))
         if ($targets.Count -eq 0) {
             Write-Host " [i] 종료할 프로세스 없음. Standby List 정리만 진행." -ForegroundColor DarkGray
         }
     } else {
         Write-Host " [i] 보존 PID 없음 — 전부 종료 진행." -ForegroundColor DarkGray
+        Write-RunLog "interactive: preserve none"
     }
 }
 
@@ -1721,6 +1782,7 @@ if (-not $SkipConfirmation -and -not $DryRun -and $targets.Count -gt 0) {
     $confirm = Read-Host "위 프로세스를 종료하고 메모리 회수를 진행할까요? [Y/n]"
     if ($confirm -match '^[nN]') {
         Write-Host "[i] 사용자 취소." -ForegroundColor DarkGray
+        Write-RunLog "run cancelled by user"
         if (-not $KeepAlive) {
             Write-Host "[i] 아무 키나 누르면 종료..."
             $null = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
@@ -1762,6 +1824,11 @@ if (-not $DryRun) {
         -ProcessesKilled  $targets.Count `
         -RuntimeSec       $elapsed
     Write-Host (" [i] 회수 이력 기록: recovery-history.csv (실행 {0:N1} 초)" -f $elapsed) -ForegroundColor DarkGray
+    Write-RunLog ("recovery: mode={0} targets={1} beforeFreeMB={2} afterFreeMB={3} recoveredMB={4} elapsedSec={5:N1}" -f $modeTag, $targets.Count, $before.FreeMB, $after.FreeMB, $recovered, $elapsed)
+    Write-RunLog "=== run complete ==="
+} else {
+    Write-RunLog ("dry-run complete targets={0}" -f $targets.Count)
+    Write-RunLog "=== run complete ==="
 }
 
 if (-not $KeepAlive) {
