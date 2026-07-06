@@ -266,6 +266,13 @@ if ($src -match '(?ms)^function\s+Write-RecoveryLog\b') {
     Write-Host "[FAIL] Write-RecoveryLog function missing" -ForegroundColor Red
 }
 
+# 8-1. Main log for hidden scheduled task execution tracking
+if ($src -match '(?ms)^function\s+Write-RunLog\b' -and $src -match 'memoryreset\.log' -and $src -match 'target: pid=' -and $src -match 'taskkill-ok') {
+    Write-Host "[PASS] Main execution file log present: memoryreset.log records target/termination result" -ForegroundColor Green
+} else {
+    Write-Host "[FAIL] Main execution log missing — scheduled cleanup cause hard to trace" -ForegroundColor Red
+}
+
 # 9. CSV lock/retry guard
 if ($src -match 'maxRetry\s*=\s*3' -and $src -match 'fallback') {
     Write-Host "[PASS] CSV file lock retry + fallback guard present" -ForegroundColor Green
