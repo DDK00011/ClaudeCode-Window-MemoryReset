@@ -612,8 +612,15 @@ function Stop-TargetProcesses {
     $activeCodexPids = @(Get-ActiveCodexProtectedPids -AllProcs $allProcs -State $codexState -Settings $codexSettings -Now (Get-Date))
     if ($activeCodexPids.Count -gt 0) {
         $Processes = @($Processes | Where-Object {
-            if ($activeCodexPids -contains [int]$_.ProcessId) {
+            $procId = [int]$_.ProcessId
+            if ($activeCodexPids -contains $procId) {
                 Write-Host " [SKIP] 진행 중인 Codex 세션 보존 → $($_.Name) (PID=$($_.ProcessId))" -ForegroundColor Green
+                return $false
+            }
+            $descPids = @(Get-DescendantPids -RootPids @($procId) -AllProcs $allProcs)
+            $hasCodexChild = @($descPids | Where-Object { $activeCodexPids -contains [int]$_ }).Count -gt 0
+            if ($hasCodexChild) {
+                Write-Host " [SKIP] 진행 중인 Codex 자손 보존 → $($_.Name) (PID=$($_.ProcessId))" -ForegroundColor Green
                 return $false
             }
             return $true
@@ -668,6 +675,10 @@ function Stop-TargetProcesses {
         Write-Host " [OK] 모든 프로세스가 graceful 종료됨." -ForegroundColor Green
         return
     }
+
+    $allProcs = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
+    $codexState = Update-ActivityState -Settings $codexSettings
+    $activeCodexPids = @(Get-ActiveCodexProtectedPids -AllProcs $allProcs -State $codexState -Settings $codexSettings -Now (Get-Date))
 
     foreach ($p in $survivors) {
         $tag = "$($p.Name) (PID=$($p.ProcessId))"
@@ -1260,24 +1271,31 @@ function Get-TrackerStatePath  { Join-Path $PSScriptRoot 'tracker-state.json' }
 function Read-ActivityState {
     $path = Get-ActivityStatePath
     if (-not (Test-Path $path)) { return @{ version = 1; updatedAt = ''; processes = @{} } }
-    try {
-        $obj = Get-Content -Path $path -Raw -Encoding UTF8 | ConvertFrom-Json
-        $h = ConvertTo-HashtableDeep $obj
-        if ($null -eq $h)           { $h = @{} }
-        if ($null -eq $h.processes) { $h.processes = @{} }
-        return $h
-    } catch {
-        Write-TrackerLog "activity-state.json 로드 실패 — 새 상태로 시작: $($_.Exception.Message)"
-        return @{ version = 1; updatedAt = ''; processes = @{} }
+    for ($attempt = 0; $attempt -lt 2; $attempt++) {
+        try {
+            $obj = Get-Content -Path $path -Raw -Encoding UTF8 | ConvertFrom-Json
+            $h = ConvertTo-HashtableDeep $obj
+            if ($null -eq $h)           { $h = @{} }
+            if ($null -eq $h.processes) { $h.processes = @{} }
+            return $h
+        } catch {
+            if ($attempt -eq 0) { Start-Sleep -Milliseconds 100; continue }
+            Write-TrackerLog "activity-state.json 로드 실패 — 새 상태로 시작: $($_.Exception.Message)"
+            return @{ version = 1; updatedAt = ''; processes = @{} }
+        }
     }
 }
 
 function Write-ActivityState {
     param($State)
+    $path = Get-ActivityStatePath
+    $tmp = "$path.$PID.$([guid]::NewGuid().ToString('N')).tmp"
     try {
-        ($State | ConvertTo-Json -Depth 8) | Set-Content -Path (Get-ActivityStatePath) -Encoding UTF8 -ErrorAction Stop
+        ($State | ConvertTo-Json -Depth 8) | Set-Content -Path $tmp -Encoding UTF8 -ErrorAction Stop
+        Move-Item -LiteralPath $tmp -Destination $path -Force -ErrorAction Stop
     } catch {
         Write-TrackerLog "activity-state.json 저장 실패: $($_.Exception.Message)"
+        Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -1311,6 +1329,7 @@ function Get-LogicalCoreCount {
 function Update-ActivityState {
     # reason: 스냅샷 4분기(신규/기존갱신/PID재사용리셋/소멸제거)를 한 흐름에서 — 분리 시 state 일관성 깨짐.
     # 각 타겟의 CPU 누적초(Get-Process.CPU) delta 로 직전 간격 CPU 율을 계산, 임계 이상이면 lastActiveAt 갱신.
+    # I/O 카운터는 진단용으로만 저장한다. 백그라운드 IPC/절전 재개 I/O 만으로 idle 시간을 리셋하지 않는다.
     param($Settings)
     $now    = Get-Date
     $nowIso = $now.ToString('o')
@@ -1354,7 +1373,18 @@ function Update-ActivityState {
         $entry    = $state.processes[$key]
 
         if ($entry -and $entry.creationDate -eq $creation) {
-            # 동일 프로세스(PID+생성시각 일치) — CPU/I/O delta 로 활동 여부 판정
+            # 동일 프로세스(PID+생성시각 일치) — CPU delta 로 활동 여부 판정, I/O 는 진단값만 갱신
+            $legacyEntry = -not $entry.activityModel
+            $legacyRepaired = $false
+            $cpuActive = $false
+            if ($legacyEntry -and $entry.lastActiveAt -eq $entry.lastSeenAt -and $null -ne $entry.lastCpuRatePct) {
+                $first = ConvertTo-DateTimeSafe $entry.firstTrackedAt
+                $legacySeen = ConvertTo-DateTimeSafe $entry.lastSeenAt
+                if ($first -and $legacySeen -and (($legacySeen - $first).TotalMinutes -ge [double]$Settings.idleMinutes) -and ([double]$entry.lastCpuRatePct -lt [double]$Settings.cpuThresholdPct)) {
+                    $entry.lastActiveAt = $entry.firstTrackedAt
+                    $legacyRepaired = $true
+                }
+            }
             if ($null -ne $cpuSec -and $null -ne $entry.lastCpuSec) {
                 $lastSeen = ConvertTo-DateTimeSafe $entry.lastSeenAt
                 $dSec = if ($lastSeen) { ($now - $lastSeen).TotalSeconds } else { 0 }
@@ -1363,11 +1393,12 @@ function Update-ActivityState {
                     if ($dCpu -lt 0) { $dCpu = 0 }
                     $ratePct = ($dCpu / $dSec / $nCores) * 100
                     $entry.lastCpuRatePct = [math]::Round($ratePct, 3)
-                    if ($ratePct -ge [double]$Settings.cpuThresholdPct) { $entry.lastActiveAt = $nowIso }
+                    if ($ratePct -ge [double]$Settings.cpuThresholdPct) {
+                        $entry.lastActiveAt = $nowIso
+                        $cpuActive = $true
+                    }
                 }
             }
-            if ($null -ne $entry.lastIoOps -and ([UInt64]$ioOps -gt [UInt64]$entry.lastIoOps)) { $entry.lastActiveAt = $nowIso }
-            if ($null -ne $entry.lastIoBytes -and ([UInt64]$ioBytes -gt [UInt64]$entry.lastIoBytes)) { $entry.lastActiveAt = $nowIso }
             if ($null -ne $cpuSec) { $entry.lastCpuSec = $cpuSec }
             $entry.lastIoOps   = $ioOps
             $entry.lastIoBytes = $ioBytes
@@ -1375,6 +1406,9 @@ function Update-ActivityState {
             $entry.name       = [string]$t.Name
             $entry.wsBytes    = [long]$t.WorkingSetSize
             $entry.ppid       = [int]$t.ParentProcessId
+            if ((-not $legacyEntry) -or $legacyRepaired -or $cpuActive) {
+                $entry.activityModel = 'cpu-tree-v2'
+            }
             $state.processes[$key] = $entry
         } else {
             # 신규 또는 PID 재사용(생성시각 불일치) → 이력 리셋, baseline 등록
@@ -1390,6 +1424,7 @@ function Update-ActivityState {
                 lastSeenAt     = $nowIso
                 wsBytes        = [long]$t.WorkingSetSize
                 ppid           = [int]$t.ParentProcessId
+                activityModel  = 'cpu-tree-v2'
             }
         }
     }
@@ -1405,7 +1440,7 @@ function Update-ActivityState {
 
 function Test-ProcessIdle {
     # 안전 판정: (1)추적 시작 후 idleMinutes 경과(관측충분) AND (2)마지막 활동 후 idleMinutes 경과
-    #            AND (3)직전 간격 CPU 율 < 임계. Codex 는 트리 전체 CPU/I/O 로 lastActiveAt 을 갱신한다.
+    #            AND (3)직전 간격 CPU 율 < 임계. Codex 는 트리 전체 CPU 로 lastActiveAt 을 갱신한다.
     #            하나라도 불충족 → 보존(false). 활성 세션 오탐 방지.
     param($Entry, $Settings, $Now)
     if (-not $Entry) { return $false }

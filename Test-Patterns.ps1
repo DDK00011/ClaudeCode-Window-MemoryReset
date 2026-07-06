@@ -98,10 +98,80 @@ if ($src -match '(?ms)^function\s+Get-ActiveCodexProtectedPids\b' -and $src -mat
 } else {
     Write-Host "[FAIL] 진행 중인 Codex active guard 누락" -ForegroundColor Red
 }
-if ($src -match 'lastIoOps' -and $src -match 'lastIoBytes' -and $src -match 'Get-DescendantPids -RootPids @\(\$procId\)') {
-    Write-Host "[PASS] Codex 트리 CPU/I/O 활동 추적 존재" -ForegroundColor Green
+$codexChildGuard = $src.IndexOf('진행 중인 Codex 자손 보존 →')
+$closeMainWindow = $src.IndexOf('CloseMainWindow()')
+if ($codexChildGuard -ge 0 -and $closeMainWindow -ge 0 -and $codexChildGuard -lt $closeMainWindow) {
+    Write-Host "[PASS] active Codex 자손은 CloseMainWindow 전부터 보호" -ForegroundColor Green
 } else {
-    Write-Host "[FAIL] Codex 트리 활동 추적 누락" -ForegroundColor Red
+    Write-Host "[FAIL] active Codex 자손 보호가 CloseMainWindow 이후에만 적용됨" -ForegroundColor Red
+}
+if ($src -match '(?ms)잔존 프로세스 트리.*?\$allProcs\s*=\s*@\(Get-CimInstance Win32_Process.*?Get-ActiveCodexProtectedPids') {
+    Write-Host "[PASS] force kill 직전 active Codex 스냅샷 재계산" -ForegroundColor Green
+} else {
+    Write-Host "[FAIL] force kill 직전 active Codex 스냅샷 재계산 누락" -ForegroundColor Red
+}
+if ($src -match 'lastIoOps' -and $src -match 'lastIoBytes' -and $src -match 'Get-DescendantPids -RootPids @\(\$procId\)' -and $src -notmatch 'lastIoOps[^\r\n]*lastActiveAt' -and $src -notmatch 'lastIoBytes[^\r\n]*lastActiveAt') {
+    Write-Host "[PASS] Codex 트리 CPU 활동 추적 + I/O 진단 기록 존재" -ForegroundColor Green
+} else {
+    Write-Host "[FAIL] Codex 트리 CPU 추적 또는 I/O-only idle 보호 누락" -ForegroundColor Red
+}
+if ($src -match "activityModel\s*=\s*'cpu-tree-v2'" -and $src -match '\$legacyEntry' -and $src -match '\$legacyRepaired' -and $src -match '\$cpuActive' -and $src -match 'lastActiveAt -eq \$entry\.lastSeenAt' -and $src -match 'lastCpuRatePct -lt \[double\]\$Settings\.cpuThresholdPct') {
+    Write-Host "[PASS] legacy I/O-only lastActiveAt 보정 존재" -ForegroundColor Green
+} else {
+    Write-Host "[FAIL] legacy I/O-only lastActiveAt 보정 누락" -ForegroundColor Red
+}
+if ($src -match '\$legacySeen\s*=\s*ConvertTo-DateTimeSafe \$entry\.lastSeenAt' -and $src -notmatch '\$seen\s*=\s*ConvertTo-DateTimeSafe \$entry\.lastSeenAt') {
+    Write-Host "[PASS] Update-ActivityState `$seen PID 해시테이블 덮어쓰기 없음" -ForegroundColor Green
+} else {
+    Write-Host "[FAIL] Update-ActivityState `$seen 변수 충돌 위험" -ForegroundColor Red
+}
+$legacyIoStateCheck = & {
+    foreach ($fnName in @('Test-IsCodexProcess','Get-DescendantPids','ConvertTo-HashtableDeep','ConvertTo-DateTimeSafe','Get-LogicalCoreCount','Read-ActivityState','Write-ActivityState','Update-ActivityState','Test-ProcessIdle','Get-ReclaimCandidates')) {
+        $fnAst = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $fnName }, $true)
+        Invoke-Expression $fnAst.Extent.Text
+    }
+    $tmp = Join-Path $env:TEMP 'memoryreset-legacy-io-test.json'
+    $now = Get-Date
+    $created = $now.AddHours(-6).ToString('o')
+    $first = $now.AddHours(-5).ToString('o')
+    $seenAt = $now.AddMinutes(-5).ToString('o')
+    $settings = [pscustomobject]@{ idleMinutes = 180; cpuThresholdPct = 0.1; trackIntervalMin = 30 }
+    function Get-ActivityStatePath { $tmp }
+    function Get-TargetProcesses { @([pscustomobject]@{ ProcessId = 1234; ParentProcessId = 1; Name = 'node.exe'; CommandLine = 'node @openai/codex/bin/codex.js'; ExecutablePath = 'C:\node\node.exe'; CreationDate = $created; WorkingSetSize = 1048576 }) }
+    function Get-CimInstance {
+        param([Parameter(Position=0)][string]$ClassName, [string]$Filter)
+        if ($ClassName -eq 'Win32_ComputerSystem') { return [pscustomobject]@{ NumberOfLogicalProcessors = 4 } }
+        return @([pscustomobject]@{ ProcessId = 1234; ParentProcessId = 1; Name = 'node.exe'; CommandLine = 'node @openai/codex/bin/codex.js'; ExecutablePath = 'C:\node\node.exe'; CreationDate = $created; WorkingSetSize = 1048576; ReadOperationCount = 2; WriteOperationCount = 0; OtherOperationCount = 0; ReadTransferCount = 2; WriteTransferCount = 0; OtherTransferCount = 0 })
+    }
+    function Get-Process { @([pscustomobject]@{ Id = 1234; CPU = $script:mockCpu }) }
+    try {
+        @{ version = 1; updatedAt = $seenAt; processes = @{ '1234' = @{ name = 'node.exe'; creationDate = $created; firstTrackedAt = $first; lastActiveAt = $seenAt; lastCpuSec = 10.0; lastCpuRatePct = 0.0; lastIoOps = 1; lastIoBytes = 1; lastSeenAt = $seenAt; wsBytes = 1048576; ppid = 1 } } } |
+            ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $tmp -Encoding UTF8
+        $script:mockCpu = 10.0
+        $null = Update-ActivityState -Settings $settings
+        $fixed = Read-ActivityState
+        $fixedEntry = $fixed.processes['1234']
+        $fixedCandidates = @(Get-ReclaimCandidates -Settings $settings)
+
+        @{ version = 1; updatedAt = $seenAt; processes = @{ '1234' = @{ name = 'node.exe'; creationDate = $created; firstTrackedAt = $first; lastActiveAt = $now.AddMinutes(-30).ToString('o'); lastCpuSec = 10.0; lastCpuRatePct = 0.0; lastIoOps = 1; lastIoBytes = 1; lastSeenAt = $seenAt; wsBytes = 1048576; ppid = 1 } } } |
+            ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $tmp -Encoding UTF8
+        $null = Update-ActivityState -Settings $settings
+        $ambiguousEntry = (Read-ActivityState).processes['1234']
+
+        return (($fixedCandidates.Count -eq 1) -and ($fixedEntry.activityModel -eq 'cpu-tree-v2') -and (-not $ambiguousEntry.activityModel))
+    } finally {
+        Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+    }
+}
+if ($legacyIoStateCheck) {
+    Write-Host "[PASS] legacy I/O-only state 보정 동작 검증" -ForegroundColor Green
+} else {
+    Write-Host "[FAIL] legacy I/O-only state 보정 동작 실패" -ForegroundColor Red
+}
+if ($src -match 'Start-Sleep -Milliseconds 100' -and $src -match 'Move-Item -LiteralPath \$tmp -Destination \$path -Force') {
+    Write-Host "[PASS] activity-state read retry + atomic replace 저장" -ForegroundColor Green
+} else {
+    Write-Host "[FAIL] activity-state 동시 읽기/쓰기 보호 누락" -ForegroundColor Red
 }
 if (($src | Select-String -Pattern 'Update-ActivityState -Settings \$idleSettings' -AllMatches).Matches.Count -gt 0 -and
     ($src | Select-String -Pattern 'Update-ActivityState -Settings \$codexSettings' -AllMatches).Matches.Count -gt 0) {
