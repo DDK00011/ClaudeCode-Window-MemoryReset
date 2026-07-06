@@ -1,7 +1,7 @@
 @echo off
 :: ════════════════════════════════════════════════════════════════════
 ::  원클릭 전체 청소 (재부팅 느낌) — UAC 승격
-::  모든 claude / Antigravity + 자손 트리(conhost/bash/node/pwsh/python/cmd 등
+::  모든 claude / Codex CLI + 자손 트리(conhost/bash/node/pwsh/python/cmd 등
 ::  세션이 띄운 "부산물")를 종료하고, 깊은 메모리 회수까지 수행:
 ::    working set 비우기 + file cache 트림 + Memory Compression flush + standby purge.
 ::

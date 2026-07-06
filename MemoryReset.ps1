@@ -1,14 +1,14 @@
 ﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
-    Claude Code 와 Antigravity 를 안전하게 종료하고 Windows RAM 을 회수합니다.
+    Claude Code / Codex CLI 부산물을 안전하게 종료하고 Windows RAM 을 회수합니다.
 
 .DESCRIPTION
     Windows 는 종료된 프로세스의 메모리를 즉시 free list 로 반환하지 않고
     Standby List / File Cache 에 남기는 경향이 있어 가용량 회복이 더딥니다.
     이 스크립트는 다음 5단계로 회수율을 끌어올립니다.
 
-      1) Claude Code / Antigravity 프로세스 graceful 종료 (CloseMainWindow)
+      1) Claude Code / Codex CLI 프로세스 graceful 종료 (CloseMainWindow)
       2) Timeout 후 잔존 프로세스 트리 강제 종료 (taskkill /T /F)
       3) 남은 모든 프로세스의 Working Set 비우기 (EmptyWorkingSet, PROCESS_SET_QUOTA)
       4) System File Cache 트림 (SetSystemFileCacheSize)
@@ -93,7 +93,7 @@ param(
     # v1.4 추가 ─────────────────────────────────────────────
     [switch]$TrackActivity,  # 백그라운드 추적 1-tick: CPU 스냅샷 기록 + 임계초과 시 텔레그램 알림. 종료 안 함, UAC 불필요.
     [switch]$IdleOnly,       # idle(idleMinutes+ 무활동) / orphan 프로세스만 정리 대상 (활성 세션 보존)
-    [switch]$IncludeDescendants  # 종료 대상 claude/Antigravity 의 자손 트리(conhost/bash/node/pwsh/python 등 부산물)도 함께 종료
+    [switch]$IncludeDescendants  # 종료 대상 claude/Codex CLI 의 자손 트리(conhost/bash/node/pwsh/python 등 부산물)도 함께 종료
 )
 
 $ErrorActionPreference = 'Continue'
@@ -402,13 +402,13 @@ function Test-IsCodexProcess {
 # ════════════════════════════════════════════════════════════════════
 # 5. 대상 프로세스 식별
 #    핵심 안전장치: Claude Desktop 앱은 절대 매칭 금지 (다중 설치 경로 블랙리스트).
-#    오직 CLI / Antigravity 확장 / 표준 Node 패키지만 종료 대상.
+#    오직 IDE 확장/터미널 CLI 와 표준 Node 패키지만 종료 대상.
 #    v1.3: -ExcludePids 로 보존, -OnlyOrphans 로 좀비만 선별.
 #    v1.4: -IncludeDescendants 로 종료 대상의 자손 트리(claude 가 띄운 부산물)까지 포함.
 # ════════════════════════════════════════════════════════════════════
 function Get-DescendantPids {
     # RootPids 의 모든 자손 PID 를 BFS 로 수집 (프로세스 트리 walk). 스냅샷($AllProcs) 기준.
-    # claude/Antigravity 가 spawn 한 conhost/bash/node/pwsh/python 등 "부산물"을 식별하는 데 사용.
+    # claude/Codex CLI 가 spawn 한 conhost/bash/node/pwsh/python 등 "부산물"을 식별하는 데 사용.
     param([int[]]$RootPids, $AllProcs)
     $childMap = @{}
     foreach ($pr in $AllProcs) {
@@ -535,15 +535,6 @@ function Get-TargetProcesses {
         ($_.Name -eq 'node.exe' -and $cmd -match '(?i)@anthropic-ai[\\/]claude-code')
     }
 
-    # ── Antigravity 식별 ──
-    # 정확한 설치 경로: %LOCALAPPDATA%\Programs\Antigravity\Antigravity.exe
-    # ExecutablePath 기준이 가장 안전 (모든 helper/renderer 포함).
-    $antigravity = $allProcs | Where-Object {
-        ($_.ExecutablePath -match '(?i)\\Programs\\Antigravity\\') -or
-        ($_.ExecutablePath -match '(?i)\\Google\\Antigravity\\') -or
-        ($_.Name -match '(?i)^Antigravity(\.exe)?$' -and $_.ExecutablePath -match '(?i)Antigravity')
-    }
-
     # ── Codex CLI 식별 ──
     # 정리 대상에는 포함하되, 실제 종료 전 활동 추적 상태로 "진행 중"이면 보존한다.
     $codexRootPids = @(Get-CodexRootPids -AllProcs $allProcs)
@@ -551,7 +542,7 @@ function Get-TargetProcesses {
 
     # 중복 제거 + 자기 자신(현재 PowerShell) 제외
     $self = $PID
-    $merged = @($claude) + @($antigravity) + @($codex) |
+    $merged = @($claude) + @($codex) |
         Where-Object { $_.ProcessId -ne $self } |
         Sort-Object ProcessId -Unique
 
@@ -561,7 +552,6 @@ function Get-TargetProcesses {
     }
 
     # v1.3: -OnlyOrphans — IDE extension host 가 죽은 claude.exe/node.exe 만 남김.
-    # Antigravity 본체 (.exe 자체) 는 IDE 자체이므로 orphan 개념 무관 → 안전을 위해 OnlyOrphans 모드에서 제외.
     if ($OnlyOrphans) {
         $merged = $merged | Where-Object {
             (-not (Test-IsCodexProcess $_)) -and
@@ -940,7 +930,7 @@ function Show-MemoryDiagnostics {
 
     # 4. 종료 대상 프로세스 카운트 (실제 회수 가능량 미리보기)
     Write-Host ""
-    Write-Host "── 종료 대상 프로세스 (Claude/Antigravity) ──" -ForegroundColor Cyan
+    Write-Host "── 종료 대상 프로세스 (Claude/Codex CLI) ──" -ForegroundColor Cyan
     $targets = @(Get-TargetProcesses)   # v1.3 안전: pipeline unwrap 방지
     if ($targets.Count -eq 0) {
         Write-Host " (없음)" -ForegroundColor DarkGray
@@ -1611,7 +1601,7 @@ function Invoke-ActivityTracking {
 # ════════════════════════════════════════════════════════════════════
 # 8. Main
 # ════════════════════════════════════════════════════════════════════
-try { $Host.UI.RawUI.WindowTitle = 'Memory Reset — Claude Code & Antigravity' } catch {}
+try { $Host.UI.RawUI.WindowTitle = 'Memory Reset — Claude/Codex CLI Cleanup' } catch {}
 
 # 실행 시간 측정 시작
 $script:startTime = Get-Date
@@ -1634,7 +1624,7 @@ Write-RunLog ("=== run start modes={0} admin={1} script={2}" -f ($runModes -join
 
 Clear-Host
 Write-Host "╔══════════════════════════════════════════════════════════╗" -ForegroundColor Cyan
-Write-Host "║      Memory Reset  —  Claude Code & Antigravity          ║" -ForegroundColor Cyan
+Write-Host "║      Memory Reset  —  Claude/Codex CLI Cleanup           ║" -ForegroundColor Cyan
 Write-Host "║      (graceful kill + working-set + standby purge)       ║" -ForegroundColor Cyan
 Write-Host "╚══════════════════════════════════════════════════════════╝" -ForegroundColor Cyan
 
@@ -1674,10 +1664,9 @@ if ($excludePidsArray.Count -gt 0) {
 
 Write-Host ""
 Write-Host "── 종료 대상 프로세스 ──" -ForegroundColor Cyan
-if ($IncludeDescendants) { Write-Host "[i] INCLUDE-DESCENDANTS 모드 — claude/Antigravity 자손 트리(conhost/bash/node/pwsh/python 부산물)도 함께 종료" -ForegroundColor Magenta }
+if ($IncludeDescendants) { Write-Host "[i] INCLUDE-DESCENDANTS 모드 — claude/Codex CLI 자손 트리(conhost/bash/node/pwsh/python 부산물)도 함께 종료" -ForegroundColor Magenta }
 $categorize = {
     param($p)
-    if ($p.ExecutablePath -match '(?i)\\Programs\\Antigravity\\')                              { return 'Antigravity' }
     if ($p.ExecutablePath -match '(?i)\\\.antigravity\\extensions')                            { return 'Claude(Antigravity ext)' }
     if ($p.ExecutablePath -match '(?i)\\\.cursor\\extensions')                                 { return 'Claude(Cursor ext)' }
     if ($p.ExecutablePath -match '(?i)\\\.vscode\\extensions')                                 { return 'Claude(VS Code ext)' }

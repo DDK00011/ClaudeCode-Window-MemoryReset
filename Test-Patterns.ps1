@@ -32,8 +32,7 @@ $targets = Get-TargetProcesses
 
 Write-Host "== 종료 대상 분류 =="
 $targets | Group-Object {
-    if ($_.ExecutablePath -match '(?i)\\Programs\\Antigravity\\') { 'Antigravity 본체' }
-    elseif ($_.ExecutablePath -match '(?i)\\\.antigravity\\extensions') { 'Claude CLI (Antigravity 확장)' }
+    if ($_.ExecutablePath -match '(?i)\\\.antigravity\\extensions') { 'Claude CLI (Antigravity 확장)' }
     elseif ($_.ExecutablePath -match '(?i)\\Claude\\claude-code\\') { 'Claude CLI (standalone)' }
     elseif (Test-IsCodexProcess $_) { 'Codex CLI' }
     elseif ($_.Name -eq 'node.exe') { 'Claude CLI (node)' }
@@ -58,6 +57,21 @@ if (@($inTargets).Count -eq 0) {
 }
 
 Write-Host ""
+Write-Host "== GUI IDE 보존 검증 =="
+$guiInTargets = $targets | Where-Object {
+    $_.Name -match '(?i)^(Antigravity|Code|Cursor|Windsurf)\.exe$' -or
+    $_.ExecutablePath -match '(?i)\\Programs\\Antigravity\\|\\Google\\Antigravity\\|\\Microsoft VS Code\\|\\Programs\\Microsoft VS Code\\'
+}
+'GUI IDE 종료 대상 포함 수: {0}' -f @($guiInTargets).Count
+if (@($guiInTargets).Count -eq 0 -and
+    $funcDef -notmatch '(?i)\\Programs\\Antigravity\\|\\Google\\Antigravity\\|Antigravity\(\\.exe\)\?') {
+    Write-Host "[PASS] Antigravity/VS Code 같은 GUI IDE 는 종료 대상에서 제외됨" -ForegroundColor Green
+} else {
+    Write-Host "[FAIL] GUI IDE 가 종료 대상에 포함되거나 Antigravity 앱 매칭이 남아 있음" -ForegroundColor Red
+    $guiInTargets | Select-Object Name, ProcessId, ExecutablePath | Format-List
+}
+
+Write-Host ""
 Write-Host "== 합계 =="
 $totalMB = [math]::Round((($targets | Measure-Object WorkingSetSize -Sum).Sum / 1MB), 1)
 '종료 시 회수 가능 (working set 기준): {0:N1} MB ({1} 프로세스)' -f $totalMB, @($targets).Count
@@ -65,7 +79,6 @@ $totalMB = [math]::Round((($targets | Measure-Object WorkingSetSize -Sum).Sum / 
 Write-Host ""
 Write-Host "== '기타' 카테고리 상세 (예상치 못한 매칭 확인) =="
 $unknown = $targets | Where-Object {
-    $_.ExecutablePath -notmatch '(?i)\\Programs\\Antigravity\\' -and
     $_.ExecutablePath -notmatch '(?i)\\\.antigravity\\extensions' -and
     $_.ExecutablePath -notmatch '(?i)\\Claude\\claude-code\\' -and
     -not (Test-IsCodexProcess $_) -and

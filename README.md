@@ -1,7 +1,7 @@
 ﻿# MemoryReset
 
 > Windows 의 RAM 가용량을 **재부팅 없이** 회수하는 PowerShell 스크립트.
-> Claude Code 와 Antigravity (Google 의 VS Code fork) 의 다중 세션 점유를 안전하게 해소합니다.
+> Antigravity / VS Code 같은 GUI IDE 가 확장·터미널로 띄운 Claude Code / Codex 작업 프로세스의 잔존 점유를 안전하게 해소합니다.
 
 [한국어](#korean) · [English](#english)
 
@@ -16,8 +16,8 @@
 
 | 측정 시점 | 메모리 사용률 | 상황 |
 |-----------|---------------|------|
-| 실행 전 | **95%** | Antigravity 32 + Claude CLI 67 + helpers = 101 프로세스, ~39 GB 점유 |
-| 실행 후 | **31%** | Antigravity·Claude CLI 완전 종료 + Standby/File Cache 회수 |
+| 실행 전 | **95%** | Claude/Codex CLI + helpers = 100+ 프로세스, ~39 GB 점유 |
+| 실행 후 | **31%** | 완료된 CLI 작업 프로세스 종료 + Standby/File Cache 회수 |
 | **회수량** | **−64%p (~40 GB)** | 재부팅 없이, 다른 앱(브라우저·메신저 등) 영향 없이 |
 
 > **측정 환경**: Windows 10 LTSC 2021 (build 19044, 21H2 기반) · DDR4 64 GB RAM
@@ -38,7 +38,7 @@
 
 | 단계 | 동작 | API |
 |------|------|-----|
-| 1 | Claude CLI / Antigravity 의 graceful 종료 | `CloseMainWindow()` + 대기 |
+| 1 | Claude/Codex CLI 의 graceful 종료 | `CloseMainWindow()` + 대기 |
 | 2 | 잔존 프로세스 트리 강제 종료 | `taskkill /F /T` |
 | 3 | 모든 프로세스의 Working Set 비우기 | `EmptyWorkingSet` (psapi) |
 | 4 | System File Cache 트림 | `SetSystemFileCacheSize(-1, -1, 0)` |
@@ -126,12 +126,9 @@ Tray-AutoStart-Register.bat
 - `--output-format stream-json` 인수를 가진 `claude.exe`
 - `@anthropic-ai/claude-code` 가 커맨드라인에 포함된 `node.exe`
 
-**Antigravity** (다음 경로의 모든 `*.exe`):
-- `%LOCALAPPDATA%\Programs\Antigravity\`
-- `%LOCALAPPDATA%\Google\Antigravity\`
-- → Electron 의 GPU/Renderer/Utility helper, language server 모두 자동 포함
-
-**절대 종료하지 않음** (Claude Desktop 앱):
+**절대 종료하지 않음** (GUI 앱):
+- `Antigravity.exe` 및 `%LOCALAPPDATA%\Programs\Antigravity\` / `%LOCALAPPDATA%\Google\Antigravity\` 아래 GUI helper
+- `Code.exe` / Cursor / Windsurf 같은 IDE 본체
 - `\WindowsApps\Claude_*` (MSIX 설치)
 - `\AnthropicClaude\app-*\Claude.exe` (Squirrel 설치)
 - `\Programs\claude-desktop\*\Claude.exe` (직접 설치)
@@ -149,7 +146,7 @@ Tray-AutoStart-Register.bat
 |------|-------------|
 | `NTSTATUS=0xC0000061` (Standby Purge) | `SeProfileSingleProcessPrivilege` 미보유 → 로컬 보안 정책 확인 (`secpol.msc` → 로컬 정책 → 사용자 권한 할당) |
 | `NTSTATUS=0xC0000022` | 관리자 권한 미승격 → UAC 다시 승인 |
-| 회수량이 작음 | Antigravity / Claude Code 외 다른 앱이 점유 중 → `Run-DryRun.bat` 으로 점유 프로세스 확인 |
+| 회수량이 작음 | Claude/Codex CLI 외 다른 앱이 점유 중 → `Run-DryRun.bat` 으로 점유 프로세스 확인 |
 | 한글 깨짐 | 콘솔 폰트를 `Consolas` / `D2Coding` 등 유니코드 폰트로 변경 |
 | 스크립트가 안 뜸 | 파일이 차단됨 — 파일 우클릭 → 속성 → "차단 해제" 체크 |
 
@@ -179,7 +176,7 @@ Tray-AutoStart-Unregister.bat     :: 자동 시작 해제
 | BeforeFreeMB / AfterFreeMB | 회수 전/후 가용 MB |
 | RecoveredMB | 회수량 (음수 가능 — 다른 앱이 점유한 경우) |
 | BeforePctFree / AfterPctFree | 회수 전/후 가용 % |
-| ProcessesKilled | 종료된 Claude/Antigravity 프로세스 개수 |
+| ProcessesKilled | 종료된 Claude/Codex CLI 프로세스 개수 |
 | RuntimeSec | 실행 소요 시간 |
 
 트레이 메뉴 → "회수 이력 보기" 로 Excel/메모장에서 열기. 어떤 모드가 본인 시스템에서 효과가 큰지 데이터 기반 판단 가능.
@@ -224,10 +221,10 @@ Run-IdleCleanup.bat           :: 실제 종료 + 메모리 회수
 ### 원클릭 전체 청소 (부산물 포함) [v1.4.1+]
 
 ```cmd
-Run-PurgeAll.bat              :: 모든 claude/Antigravity + 자손 부산물 종료 + standby purge
+Run-PurgeAll.bat              :: 모든 claude/Codex CLI + 자손 부산물 종료 + standby purge
 ```
 
-`-IncludeDescendants` 는 종료 대상 claude/Antigravity 의 **자손 프로세스 트리**(세션이 띄운 `conhost`·`bash`·`node`·`pwsh`·`python`·`cmd` 등 부산물)를 함께 종료합니다. `Run-PurgeAll.bat` 은 여기에 깊은 회수(`-Deep`: working set + file cache + Memory Compression flush + standby purge)를 더해 **재부팅에 가까운 청소**를 한 번에 수행합니다.
+`-IncludeDescendants` 는 종료 대상 claude/Codex CLI 의 **자손 프로세스 트리**(세션이 띄운 `conhost`·`bash`·`node`·`pwsh`·`python`·`cmd` 등 부산물)를 함께 종료합니다. `Run-PurgeAll.bat` 은 여기에 깊은 회수(`-Deep`: working set + file cache + Memory Compression flush + standby purge)를 더해 **재부팅에 가까운 청소**를 한 번에 수행합니다.
 
 > 사용자가 직접 띄운 셸은 claude 자손이 아니므로 **건드리지 않습니다**. 특정 세션을 살리려면 `-Interactive` 또는 `-KeepPids "PID"` 와 함께 쓰면 보존된 세션의 자손까지 자동 제외됩니다(보존 claude 는 트리 root 가 아니므로).
 >
@@ -262,7 +259,7 @@ Run-PurgeAll.bat              :: 모든 claude/Antigravity + 자손 부산물 �
 
 | Stage | Action | API |
 |-------|--------|-----|
-| 1 | Graceful close of Claude CLI / Antigravity | `CloseMainWindow()` + wait |
+| 1 | Graceful close of Claude/Codex CLI | `CloseMainWindow()` + wait |
 | 2 | Force-kill surviving process trees | `taskkill /F /T` |
 | 3 | Empty working set of all processes | `EmptyWorkingSet` (psapi) |
 | 4 | Trim system file cache | `SetSystemFileCacheSize(-1, -1, 0)` |
@@ -344,11 +341,9 @@ Or directly via PowerShell:
 - Any `claude.exe` invoked with `--output-format stream-json`
 - Any `node.exe` whose command line contains `@anthropic-ai/claude-code`
 
-**Antigravity** — all `*.exe` from these paths (covers GPU/Renderer/Utility helpers and language servers):
-- `%LOCALAPPDATA%\Programs\Antigravity\`
-- `%LOCALAPPDATA%\Google\Antigravity\`
-
-**Never terminated** (Claude Desktop app):
+**Never terminated** (GUI apps):
+- `Antigravity.exe` and GUI helpers under `%LOCALAPPDATA%\Programs\Antigravity\` / `%LOCALAPPDATA%\Google\Antigravity\`
+- GUI IDE hosts such as `Code.exe`, Cursor, and Windsurf
 - `\WindowsApps\Claude_*` (MSIX install)
 - `\AnthropicClaude\app-*\Claude.exe` (Squirrel install)
 - `\Programs\claude-desktop\*\Claude.exe` (direct install)
