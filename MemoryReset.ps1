@@ -612,8 +612,15 @@ function Stop-TargetProcesses {
     $activeCodexPids = @(Get-ActiveCodexProtectedPids -AllProcs $allProcs -State $codexState -Settings $codexSettings -Now (Get-Date))
     if ($activeCodexPids.Count -gt 0) {
         $Processes = @($Processes | Where-Object {
-            if ($activeCodexPids -contains [int]$_.ProcessId) {
+            $procId = [int]$_.ProcessId
+            if ($activeCodexPids -contains $procId) {
                 Write-Host " [SKIP] Preserve active Codex session → $($_.Name) (PID=$($_.ProcessId))" -ForegroundColor Green
+                return $false
+            }
+            $descPids = @(Get-DescendantPids -RootPids @($procId) -AllProcs $allProcs)
+            $hasCodexChild = @($descPids | Where-Object { $activeCodexPids -contains [int]$_ }).Count -gt 0
+            if ($hasCodexChild) {
+                Write-Host " [SKIP] Preserve active Codex descendant → $($_.Name) (PID=$($_.ProcessId))" -ForegroundColor Green
                 return $false
             }
             return $true
@@ -668,6 +675,10 @@ function Stop-TargetProcesses {
         Write-Host " [OK] All processes completed a graceful exit." -ForegroundColor Green
         return
     }
+
+    $allProcs = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
+    $codexState = Update-ActivityState -Settings $codexSettings
+    $activeCodexPids = @(Get-ActiveCodexProtectedPids -AllProcs $allProcs -State $codexState -Settings $codexSettings -Now (Get-Date))
 
     foreach ($p in $survivors) {
         $tag = "$($p.Name) (PID=$($p.ProcessId))"
@@ -1260,24 +1271,31 @@ function Get-TrackerStatePath  { Join-Path $PSScriptRoot 'tracker-state.json' }
 function Read-ActivityState {
     $path = Get-ActivityStatePath
     if (-not (Test-Path $path)) { return @{ version = 1; updatedAt = ''; processes = @{} } }
-    try {
-        $obj = Get-Content -Path $path -Raw -Encoding UTF8 | ConvertFrom-Json
-        $h = ConvertTo-HashtableDeep $obj
-        if ($null -eq $h)           { $h = @{} }
-        if ($null -eq $h.processes) { $h.processes = @{} }
-        return $h
-    } catch {
-        Write-TrackerLog "Failed to load activity-state.json — starting with new state: $($_.Exception.Message)"
-        return @{ version = 1; updatedAt = ''; processes = @{} }
+    for ($attempt = 0; $attempt -lt 2; $attempt++) {
+        try {
+            $obj = Get-Content -Path $path -Raw -Encoding UTF8 | ConvertFrom-Json
+            $h = ConvertTo-HashtableDeep $obj
+            if ($null -eq $h)           { $h = @{} }
+            if ($null -eq $h.processes) { $h.processes = @{} }
+            return $h
+        } catch {
+            if ($attempt -eq 0) { Start-Sleep -Milliseconds 100; continue }
+            Write-TrackerLog "Failed to load activity-state.json — starting with new state: $($_.Exception.Message)"
+            return @{ version = 1; updatedAt = ''; processes = @{} }
+        }
     }
 }
 
 function Write-ActivityState {
     param($State)
+    $path = Get-ActivityStatePath
+    $tmp = "$path.$PID.$([guid]::NewGuid().ToString('N')).tmp"
     try {
-        ($State | ConvertTo-Json -Depth 8) | Set-Content -Path (Get-ActivityStatePath) -Encoding UTF8 -ErrorAction Stop
+        ($State | ConvertTo-Json -Depth 8) | Set-Content -Path $tmp -Encoding UTF8 -ErrorAction Stop
+        Move-Item -LiteralPath $tmp -Destination $path -Force -ErrorAction Stop
     } catch {
         Write-TrackerLog "Failed to save activity-state.json: $($_.Exception.Message)"
+        Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -1311,6 +1329,7 @@ function Get-LogicalCoreCount {
 function Update-ActivityState {
     # reason: handles 4 snapshot branches(new/existing update/PID reuse reset/terminated removal) in one flow — splitting breaks state consistency.
     # Calculate the previous interval CPU rate from each target cumulative CPU seconds(Get-Process.CPU) delta, update lastActiveAt when at or above threshold.
+    # Save I/O counters for diagnostics only. Do not reset idle time solely from background IPC/sleep-resume I/O.
     param($Settings)
     $now    = Get-Date
     $nowIso = $now.ToString('o')
@@ -1354,7 +1373,18 @@ function Update-ActivityState {
         $entry    = $state.processes[$key]
 
         if ($entry -and $entry.creationDate -eq $creation) {
-            # Same process (PID+creation time match) — determine activity from CPU/I/O delta
+            # Same process(PID+creation time matches) — determine activity from CPU delta, update I/O diagnostics only
+            $legacyEntry = -not $entry.activityModel
+            $legacyRepaired = $false
+            $cpuActive = $false
+            if ($legacyEntry -and $entry.lastActiveAt -eq $entry.lastSeenAt -and $null -ne $entry.lastCpuRatePct) {
+                $first = ConvertTo-DateTimeSafe $entry.firstTrackedAt
+                $legacySeen = ConvertTo-DateTimeSafe $entry.lastSeenAt
+                if ($first -and $legacySeen -and (($legacySeen - $first).TotalMinutes -ge [double]$Settings.idleMinutes) -and ([double]$entry.lastCpuRatePct -lt [double]$Settings.cpuThresholdPct)) {
+                    $entry.lastActiveAt = $entry.firstTrackedAt
+                    $legacyRepaired = $true
+                }
+            }
             if ($null -ne $cpuSec -and $null -ne $entry.lastCpuSec) {
                 $lastSeen = ConvertTo-DateTimeSafe $entry.lastSeenAt
                 $dSec = if ($lastSeen) { ($now - $lastSeen).TotalSeconds } else { 0 }
@@ -1363,11 +1393,12 @@ function Update-ActivityState {
                     if ($dCpu -lt 0) { $dCpu = 0 }
                     $ratePct = ($dCpu / $dSec / $nCores) * 100
                     $entry.lastCpuRatePct = [math]::Round($ratePct, 3)
-                    if ($ratePct -ge [double]$Settings.cpuThresholdPct) { $entry.lastActiveAt = $nowIso }
+                    if ($ratePct -ge [double]$Settings.cpuThresholdPct) {
+                        $entry.lastActiveAt = $nowIso
+                        $cpuActive = $true
+                    }
                 }
             }
-            if ($null -ne $entry.lastIoOps -and ([UInt64]$ioOps -gt [UInt64]$entry.lastIoOps)) { $entry.lastActiveAt = $nowIso }
-            if ($null -ne $entry.lastIoBytes -and ([UInt64]$ioBytes -gt [UInt64]$entry.lastIoBytes)) { $entry.lastActiveAt = $nowIso }
             if ($null -ne $cpuSec) { $entry.lastCpuSec = $cpuSec }
             $entry.lastIoOps   = $ioOps
             $entry.lastIoBytes = $ioBytes
@@ -1375,6 +1406,9 @@ function Update-ActivityState {
             $entry.name       = [string]$t.Name
             $entry.wsBytes    = [long]$t.WorkingSetSize
             $entry.ppid       = [int]$t.ParentProcessId
+            if ((-not $legacyEntry) -or $legacyRepaired -or $cpuActive) {
+                $entry.activityModel = 'cpu-tree-v2'
+            }
             $state.processes[$key] = $entry
         } else {
             # New or PID reuse(creation time mismatch) → reset history, register baseline
@@ -1390,6 +1424,7 @@ function Update-ActivityState {
                 lastSeenAt     = $nowIso
                 wsBytes        = [long]$t.WorkingSetSize
                 ppid           = [int]$t.ParentProcessId
+                activityModel  = 'cpu-tree-v2'
             }
         }
     }
@@ -1405,7 +1440,7 @@ function Update-ActivityState {
 
 function Test-ProcessIdle {
     # Safe determination: (1)idleMinutes elapsed since tracking started(sufficient observation) AND (2)idleMinutes elapsed since last activity
-    #            AND (3) previous interval CPU rate < threshold. Codex updates lastActiveAt from tree-wide CPU/I/O.
+    #            AND (3)previous interval CPU rate < threshold. Codex updates lastActiveAt with CPU across the tree.
     #            Any unmet condition → preserve(false). Prevent active session false positives.
     param($Entry, $Settings, $Now)
     if (-not $Entry) { return $false }
