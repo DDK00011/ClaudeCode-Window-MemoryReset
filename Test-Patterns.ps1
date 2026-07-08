@@ -446,7 +446,7 @@ if (Test-Path (Join-Path $PSScriptRoot 'tracker-settings.example.json')) {
 }
 
 # 23. 스케줄러/런처 스크립트 존재
-foreach ($script in @('Track-Schedule.ps1','Track-Register.bat','Track-Unregister.bat','Run-IdleDryRun.bat','Run-IdleCleanup.bat')) {
+foreach ($script in @('Track-Schedule.ps1','Cleanup-Schedule.ps1','Run-Hidden.vbs','Track-Register.bat','Track-Unregister.bat','Run-IdleDryRun.bat','Run-IdleCleanup.bat')) {
     if (Test-Path (Join-Path $PSScriptRoot $script)) {
         Write-Host "[PASS] 스크립트 존재: $script" -ForegroundColor Green
     } else {
@@ -454,8 +454,19 @@ foreach ($script in @('Track-Schedule.ps1','Track-Register.bat','Track-Unregiste
     }
 }
 
-# 24. 자동 정리 주기/텔레그램 안내 문구 동기화
+# 24. 스케줄러 등록은 콘솔 포커스 탈취 방지용 wscript 래퍼 사용
+$trackSrc = Get-Content (Join-Path $PSScriptRoot 'Track-Schedule.ps1') -Raw
 $cleanupSrc = Get-Content (Join-Path $PSScriptRoot 'Cleanup-Schedule.ps1') -Raw
+if ($trackSrc -match "New-ScheduledTaskAction -Execute 'wscript\.exe'" -and
+    $trackSrc -match 'Run-Hidden\.vbs' -and
+    $cleanupSrc -match "New-ScheduledTaskAction -Execute 'wscript\.exe'" -and
+    $cleanupSrc -match 'Run-Hidden\.vbs') {
+    Write-Host "[PASS] 스케줄러 등록 wscript 숨김 래퍼 사용" -ForegroundColor Green
+} else {
+    Write-Host "[FAIL] 스케줄러 등록이 powershell.exe 직접 실행으로 되돌아갈 위험" -ForegroundColor Red
+}
+
+# 25. 자동 정리 주기/텔레그램 안내 문구 동기화
 if ($cleanupSrc -match '\[int\]\$IntervalHours\s*=\s*3' -and $src -match 'ClaudeCodeMemoryCleanup.+3시간마다') {
     Write-Host "[PASS] 자동 정리 기본 3시간 + 텔레그램 안내 동기화" -ForegroundColor Green
 } else {
