@@ -24,6 +24,7 @@ $ErrorActionPreference = 'Stop'
 
 $taskName   = 'ClaudeCodeMemoryTracker'
 $scriptPath = Join-Path $PSScriptRoot 'MemoryReset.ps1'
+$runnerPath = Join-Path $PSScriptRoot 'Run-Hidden.vbs'
 
 function Test-IsAdmin {
     $id = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -52,8 +53,8 @@ if ($Remove) {
 }
 
 # ── Registration ──
-if (-not (Test-Path $scriptPath)) {
-    Write-Host "[X] Cannot find MemoryReset.ps1 in the same folder: $scriptPath" -ForegroundColor Red
+if (-not (Test-Path $scriptPath) -or -not (Test-Path $runnerPath)) {
+    Write-Host "[X] Cannot find MemoryReset.ps1 or Run-Hidden.vbs in the same folder" -ForegroundColor Red
     exit 1
 }
 
@@ -68,8 +69,8 @@ if (Test-Path $cfg) {
 }
 
 try {
-    $argStr   = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$scriptPath`" -TrackActivity"
-    $action   = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $argStr
+    $argStr   = "//B //NoLogo `"$runnerPath`" -TrackActivity"
+    $action   = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument $argStr
     $trigger  = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(1)) `
                     -RepetitionInterval (New-TimeSpan -Minutes $interval) `
                     -RepetitionDuration (New-TimeSpan -Days 3650)

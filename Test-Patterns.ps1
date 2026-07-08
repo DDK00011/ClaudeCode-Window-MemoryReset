@@ -446,7 +446,7 @@ if (Test-Path (Join-Path $PSScriptRoot 'tracker-settings.example.json')) {
 }
 
 # 23. Task Scheduler/launcher scripts exist
-foreach ($script in @('Track-Schedule.ps1','Track-Register.bat','Track-Unregister.bat','Run-IdleDryRun.bat','Run-IdleCleanup.bat')) {
+foreach ($script in @('Track-Schedule.ps1','Cleanup-Schedule.ps1','Run-Hidden.vbs','Track-Register.bat','Track-Unregister.bat','Run-IdleDryRun.bat','Run-IdleCleanup.bat')) {
     if (Test-Path (Join-Path $PSScriptRoot $script)) {
         Write-Host "[PASS] Script exists: $script" -ForegroundColor Green
     } else {
@@ -454,8 +454,19 @@ foreach ($script in @('Track-Schedule.ps1','Track-Register.bat','Track-Unregiste
     }
 }
 
-# 24. Sync auto cleanup interval/Telegram notice text
+# 24. Task Scheduler registration uses wscript wrapper to prevent console focus theft
+$trackSrc = Get-Content (Join-Path $PSScriptRoot 'Track-Schedule.ps1') -Raw
 $cleanupSrc = Get-Content (Join-Path $PSScriptRoot 'Cleanup-Schedule.ps1') -Raw
+if ($trackSrc -match "New-ScheduledTaskAction -Execute 'wscript\.exe'" -and
+    $trackSrc -match 'Run-Hidden\.vbs' -and
+    $cleanupSrc -match "New-ScheduledTaskAction -Execute 'wscript\.exe'" -and
+    $cleanupSrc -match 'Run-Hidden\.vbs') {
+    Write-Host "[PASS] Task Scheduler registration uses hidden wscript wrapper" -ForegroundColor Green
+} else {
+    Write-Host "[FAIL] Task Scheduler registration may revert to direct powershell.exe execution" -ForegroundColor Red
+}
+
+# 25. Auto cleanup interval/Telegram guidance text synchronization
 if ($cleanupSrc -match '\[int\]\$IntervalHours\s*=\s*3' -and $src -match 'ClaudeCodeMemoryCleanup.+every 3 hours') {
     Write-Host "[PASS] Auto cleanup default 3 hours + Telegram guidance synchronization" -ForegroundColor Green
 } else {
