@@ -61,6 +61,47 @@ macOS 에서 실제로 RAM 을 먹는 건 **버려진 채 살아있는 CLI 프�
 
 ---
 
+## 설치 — 다른 맥에 옮기기
+
+```bash
+git clone -b macos-port git@github.com:DDK00011/ClaudeCode-Window-MemoryReset.git
+cd ClaudeCode-Window-MemoryReset/macos
+./setup.sh
+```
+
+`setup.sh` 는 아무것도 종료하지 않습니다. 환경을 점검하고, 실행 권한과 격리 속성을 정리하고,
+안전 규칙 45종을 검증한 뒤, **그 맥의 실제 현황**을 보여주고 다음 단계를 안내합니다.
+Finder 에서 `Setup.command` 를 더블클릭해도 됩니다.
+
+| 옵션 | 추가 동작 |
+|---|---|
+| `./setup.sh` | 점검 + 테스트 + 진단만 |
+| `./setup.sh --with-menubar` | + 메뉴 막대 앱 빌드/실행 |
+| `./setup.sh --with-launchd` | + 백그라운드 추적 에이전트 등록 |
+| `./setup.sh --all` | 전부 |
+
+### 맥마다 다시 해야 하는 것 (중요)
+
+| 항목 | 이유 |
+|---|---|
+| **메뉴 막대 앱 빌드** | 바이너리는 커밋되지 않습니다 (아키텍처 의존). `./build-menubar.sh` 로 각 맥에서 빌드 |
+| **launchd 등록** | plist 에 **절대 경로**가 박힙니다. 폴더를 옮겼다면 `./install-launchd.sh` 를 **다시** 실행 |
+| **`--dry-run` 먼저** | claude 설치 형태(네이티브 / npm / IDE 확장)가 맥마다 다를 수 있습니다. 대상이 0개로 나오면 아래 참고 |
+
+> **zip 으로 받았다면**: macOS 가 `com.apple.quarantine` 을 붙여 `.command` 더블클릭이 막힙니다.
+> `setup.sh` 가 자동으로 제거합니다. `git clone` 으로 받으면 애초에 붙지 않습니다.
+
+### 대상이 0개로 나올 때
+
+이 포팅의 식별 규칙은 **네이티브 설치**(`~/.local/share/claude/`)와 npm/IDE 확장 설치를 다룹니다.
+claude 를 쓰고 있는데도 0개라면 설치 형태가 다른 것이니, 아래 출력을 확인하고 이슈로 알려주세요:
+
+```bash
+ps -axo pid,ppid,rss,command | grep -iE 'claude|codex' | grep -v grep
+```
+
+---
+
 ## 빠른 시작
 
 ```bash
