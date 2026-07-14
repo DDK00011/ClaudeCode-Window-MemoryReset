@@ -53,3 +53,13 @@ PSScriptAnalyzerResults.txt
 # Test outputs
 test-output/
 *.tmp
+
+# ── macOS 포팅 (macos/) ──
+macos/tracker-settings.json
+macos/menubar-settings.json
+macos/activity-state.tsv
+macos/tracker-state.tsv
+macos/recovery-history.csv
+macos/*.log
+macos/.menubar.lock
+macos/MemoryResetMenuBar.app/

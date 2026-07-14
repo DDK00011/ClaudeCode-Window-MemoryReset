@@ -5,10 +5,15 @@
 
 [한국어](#korean) · [English](#english)
 
+> 🍎 **macOS 사용자**: [macos/README-macOS.md](macos/README-macOS.md) — zsh 이식본.
+> macOS 에는 Standby List 가 없어 문제의 성격이 다릅니다. 커널 조작 대신 **누적된 CLI 프로세스 정리**에
+> 집중하며, 프로세스 종료에 **sudo 가 필요 없습니다**.
+
 ---
 
 ![PowerShell 5.1+](https://img.shields.io/badge/PowerShell-5.1%2B-blue?logo=powershell)
 ![Windows 10/11](https://img.shields.io/badge/Windows-10%20%2F%2011-0078D6?logo=windows)
+![macOS 12+](https://img.shields.io/badge/macOS-12%2B-000000?logo=apple)
 ![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)
 ![Status: stable](https://img.shields.io/badge/Status-stable-success)
 
