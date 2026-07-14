@@ -237,17 +237,31 @@ Verify Claude Desktop preservation / IDE main app preservation / orphan detectio
 This is equivalent to the Windows version's Task Scheduler(`Track-Register.bat` / `Cleanup-Schedule.ps1`).
 
 ```bash
-./install-launchd.sh            # Register tracking + auto cleanup
-./install-launchd.sh --status   # Check status
-./install-launchd.sh --remove   # Unregister
+./install-launchd.sh                      # Register tracking + auto cleanup (cleanup default 3 hours)
+./install-launchd.sh --interval-min 90    # Run auto cleanup at 1 hour 30 minute intervals
+./install-launchd.sh --status             # Check status
+./install-launchd.sh --remove             # Unregister both
 ```
+
+> To change the interval, **just register it again** — `install-launchd.sh` overwrites the existing plist and
+> reloads it. No separate unregistration is needed.
 
 Registered items:
 
 | LaunchAgent | Interval | Action |
 |---|---|---|
 | `com.claudecode.memoryreset.tracker` | `trackIntervalMin` (default 5 minutes) | Logs CPU snapshots + sends Telegram alerts when the threshold is exceeded. **Never terminates** |
-| `com.claudecode.memoryreset.cleanup` | Default 3 hours | `--idle-only` — terminate only idle/orphans. Preserve active sessions |
+| `com.claudecode.memoryreset.cleanup` | default 3 hours (change with `--interval-min`) | `--idle-only` — terminates idle/orphans only. Preserves active sessions |
+
+**The cleanup interval and `idleMinutes` are different values** — easy to confuse, so keep them separate:
+
+| | Meaning | Default |
+|---|---|---|
+| Cleanup interval (`--interval-min`) | How **often it checks** | 180 minutes |
+| `idleMinutes` (settings file) | How **long it must be idle** before termination | 60 minutes |
+
+In other words, `--interval-min 90` + `idleMinutes 60` = **checks every 90 minutes and terminates only sessions inactive for over 60 minutes**.
+Even with a shorter cleanup interval, sessions inactive for less than 60 minutes are never terminated.
 
 > **sudo is not needed.** LaunchAgent runs with user permissions. root is not needed to terminate processes.
 > cleanup is registered with `--no-purge` because it runs unattended (it would wait forever if a sudo prompt appears).

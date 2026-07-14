@@ -33,14 +33,18 @@ info() { print -r -- "${C_GRAY}$*${C_RESET}" }
 head1(){ print -r -- "${C_CYAN}$*${C_RESET}" }
 
 ACTION=install
-INTERVAL_HOURS=3
+# cleanup intervals are stored in minutes — accepting only hour units(integers) cannot express values like 90 minutes
+# be expressed. --interval-hours remains for compatibility and converts internally to minutes.
+CLEANUP_INTERVAL_MIN=180
 
 while (( $# > 0 )); do
   case "$1" in
     --remove|--uninstall) ACTION=remove ;;
     --status)             ACTION=status ;;
-    --interval-hours)     INTERVAL_HOURS="${2:-3}"; shift ;;
-    --interval-hours=*)   INTERVAL_HOURS="${1#*=}" ;;
+    --interval-min)       CLEANUP_INTERVAL_MIN="${2:-180}"; shift ;;
+    --interval-min=*)     CLEANUP_INTERVAL_MIN="${1#*=}" ;;
+    --interval-hours)     CLEANUP_INTERVAL_MIN=$(( ${2:-3} * 60 )); shift ;;
+    --interval-hours=*)   CLEANUP_INTERVAL_MIN=$(( ${1#*=} * 60 )) ;;
     -h|--help)
       cat <<'EOF'
 Usage: ./install-launchd.sh [options]
@@ -48,7 +52,8 @@ Usage: ./install-launchd.sh [options]
   (no options)            tracker + cleanup LaunchAgent registration
   --remove                unregister both
   --status                check registration/run status
-  --interval-hours N      cleanup interval (default 3 hours)
+  --interval-min N        cleanup interval (minutes). Default 180 (=3 hours). Example: 90 → 1 hour 30 minutes
+  --interval-hours N      hour units with same meaning (integers only). --interval-min is more precise
 
 Registered items:
   com.claudecode.memoryreset.tracker  — trackIntervalMin(default 5 minutes) interval, CPU snapshot + alert
@@ -62,8 +67,11 @@ EOF
   shift
 done
 
-[[ "$INTERVAL_HOURS" =~ '^[0-9]+$' ]] || { err "[X] --interval-hours must be an integer"; exit 1 }
-(( INTERVAL_HOURS < 1 )) && INTERVAL_HOURS=1
+[[ "$CLEANUP_INTERVAL_MIN" =~ '^[0-9]+$' ]] || { err "[X] interval must be an integer(minutes)"; exit 1 }
+(( CLEANUP_INTERVAL_MIN < 5 )) && {
+  warn "[!] interval is too short (${CLEANUP_INTERVAL_MIN} minutes) — raise to minimum 5 minutes"
+  CLEANUP_INTERVAL_MIN=5
+}
 
 # launchctl bootstrap/bootout (newer) → load/unload (older) fallback
 lc_load() {
@@ -185,12 +193,16 @@ info "     → ${INTERVAL_MIN} minute interval --track-activity (CPU snapshot + 
 info "     → never terminates processes (read-only)"
 
 # 2) cleanup — idle/orphans only terminate. unattended so --no-purge (prevent sudo prompts)
-write_plist "$CLEANUP_PLIST" "$CLEANUP_LABEL" $(( INTERVAL_HOURS * 3600 )) \
+write_plist "$CLEANUP_PLIST" "$CLEANUP_LABEL" $(( CLEANUP_INTERVAL_MIN * 60 )) \
   "--idle-only" "--skip-confirmation" "--no-purge"
 plutil -lint "$CLEANUP_PLIST" >/dev/null 2>&1 || { err "[X] cleanup plist creation failed"; exit 1 }
 lc_load "$CLEANUP_PLIST" "$CLEANUP_LABEL"
 ok "[OK] auto cleanup registered: $CLEANUP_LABEL"
-info "     → ${INTERVAL_HOURS} hour interval --idle-only (terminate idle/orphans only, preserve active sessions)"
+if (( CLEANUP_INTERVAL_MIN % 60 == 0 )); then
+  info "     → $(( CLEANUP_INTERVAL_MIN / 60 )) hour interval --idle-only (idle/orphans only terminate, preserve active sessions)"
+else
+  info "     → ${CLEANUP_INTERVAL_MIN} minute interval ($(( CLEANUP_INTERVAL_MIN / 60 )) hours $(( CLEANUP_INTERVAL_MIN % 60 )) minutes) --idle-only (idle/orphans only terminate, preserve active sessions)"
+fi
 info "     → --no-purge: prevent blocking on sudo prompts during unattended execution"
 info "        (process termination itself needs no sudo and works normally)"
 
