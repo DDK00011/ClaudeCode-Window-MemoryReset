@@ -61,6 +61,47 @@ Instead, we stated that they do not exist and retained only steps that actually 
 
 ---
 
+## Installation — Moving to another Mac
+
+```bash
+git clone -b macos-port git@github.com:DDK00011/ClaudeCode-Window-MemoryReset.git
+cd ClaudeCode-Window-MemoryReset/macos
+./setup.sh
+```
+
+`setup.sh` does not terminate anything. It checks the environment, cleans up execution permissions and quarantine attributes,
+validates 45 safety rules, then shows **that Mac's actual status** and guides you through the next steps.
+You can also double click `Setup.command` in Finder.
+
+| Option | Additional action |
+|---|---|
+| `./setup.sh` | Checks + tests + diagnostics only |
+| `./setup.sh --with-menubar` | + Build/run menu bar app |
+| `./setup.sh --with-launchd` | + Register background tracking agent |
+| `./setup.sh --all` | All |
+
+### Things to do again on each Mac (Important)
+
+| Item | Reason |
+|---|---|
+| **Build menu bar app** | Binaries are not committed (architecture-dependent). Build on each Mac with `./build-menubar.sh` |
+| **Register launchd** | **Absolute paths** are embedded in the plist. If you moved the folder, run `./install-launchd.sh` **again** |
+| **Run `--dry-run` first** | The claude installation type (native / npm / IDE extension) can vary by Mac. If 0 targets appear, see below |
+
+> **If you received it as a zip**: macOS adds `com.apple.quarantine`, blocking double-clicking `.command`.
+> `setup.sh` removes it automatically. If received via `git clone`, it is not added in the first place.
+
+### When 0 targets appear
+
+This port's identification rules cover **native installs** (`~/.local/share/claude/`) and npm/IDE extension installs.
+If you use claude but still get 0, the installation type is different, so check the output below and report it in an issue:
+
+```bash
+ps -axo pid,ppid,rss,command | grep -iE 'claude|codex' | grep -v grep
+```
+
+---
+
 ## Quick start
 
 ```bash
