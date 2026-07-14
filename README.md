@@ -3,10 +3,15 @@
 > A PowerShell script that recovers available Windows RAM **without rebooting**.
 > Safely clears remaining memory usage from Claude Code / Codex task processes that GUI IDEs such as Antigravity / VS Code launch through extensions·terminals.
 
+> 🍎 **macOS users**: [macos/README-macOS.md](macos/README-macOS.md) — zsh port.
+> macOS has no Standby List, so the nature of the problem is different. It emphasizes **cleanup of accumulated CLI processes** over
+> kernel manipulation, and **sudo is not required** to terminate processes.
+
 ---
 
 ![PowerShell 5.1+](https://img.shields.io/badge/PowerShell-5.1%2B-blue?logo=powershell)
 ![Windows 10/11](https://img.shields.io/badge/Windows-10%20%2F%2011-0078D6?logo=windows)
+![macOS 12+](https://img.shields.io/badge/macOS-12%2B-000000?logo=apple)
 ![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)
 ![Status: stable](https://img.shields.io/badge/Status-stable-success)
 

@@ -1,0 +1,30 @@
+{
+  "_comment": "Copy this file to tracker-settings.json then fill in telegramBotToken / telegramChatId. tracker-settings.json is not committed due to .gitignore (token protection).",
+
+  "idleMinutes": 60,
+  "_idleMinutes": "If continuous inactivity exceeds this time(min) + CPU is below threshold classify as idle(abandoned session). Active sessions always use CPU within 1 hour to prevent false positives.",
+
+  "cpuThresholdPct": 0.5,
+  "_cpuThresholdPct": "If CPU usage is at least this % during the tracking interval, treat it as 'active' and update lastActive. Otherwise, accumulate idle.",
+
+  "trackIntervalMin": 5,
+  "_trackIntervalMin": "Background tracking (snapshot) interval (minutes). install-launchd.sh registers --track-activity LaunchAgent at this interval.",
+
+  "alert": {
+    "enabled": false,
+    "telegramBotToken": "",
+    "telegramChatId": "",
+
+    "ramPctThreshold": 10,
+    "_ramPctThreshold": "Alert if total idle/orphan process memory is this % or more of total RAM (OR condition).",
+
+    "idleCountThreshold": 10,
+    "_idleCountThreshold": "Alert if idle/orphan process count is this value or more (OR condition).",
+
+    "idleMemMBThreshold": 4096,
+    "_idleMemMBThreshold": "Absolute total idle/orphan process memory(MB) threshold (OR condition).",
+
+    "cooldownMin": 30,
+    "_cooldownMin": "No further alert within this time(min) after the previous alert (prevent spam)."
+  }
+}
