@@ -237,17 +237,31 @@ Claude Desktop 보존 / IDE 본체 보존 / 고아 판정 / 분류를 합성 커
 Windows 판의 작업 스케줄러(`Track-Register.bat` / `Cleanup-Schedule.ps1`) 대응입니다.
 
 ```bash
-./install-launchd.sh            # 추적 + 자동 정리 등록
-./install-launchd.sh --status   # 상태 확인
-./install-launchd.sh --remove   # 해제
+./install-launchd.sh                      # 추적 + 자동 정리 등록 (정리 기본 3시간)
+./install-launchd.sh --interval-min 90    # 자동 정리를 1시간 30분 간격으로
+./install-launchd.sh --status             # 상태 확인
+./install-launchd.sh --remove             # 둘 다 해제
 ```
+
+> 간격을 바꾸려면 **다시 등록하면 됩니다** — `install-launchd.sh` 가 기존 plist 를 덮어쓰고
+> 재로드합니다. 따로 해제할 필요 없습니다.
 
 등록되는 것:
 
 | LaunchAgent | 주기 | 동작 |
 |---|---|---|
 | `com.claudecode.memoryreset.tracker` | `trackIntervalMin` (기본 5분) | CPU 스냅샷 기록 + 임계 초과 시 텔레그램 알림. **절대 종료 안 함** |
-| `com.claudecode.memoryreset.cleanup` | 기본 3시간 | `--idle-only` — idle/고아만 종료. 활성 세션 보존 |
+| `com.claudecode.memoryreset.cleanup` | 기본 3시간 (`--interval-min` 으로 변경) | `--idle-only` — idle/고아만 종료. 활성 세션 보존 |
+
+**정리 주기와 `idleMinutes` 는 다른 값입니다** — 헷갈리기 쉬우니 구분하세요:
+
+| | 뜻 | 기본값 |
+|---|---|---|
+| 정리 주기 (`--interval-min`) | 얼마나 **자주 확인**하는가 | 180분 |
+| `idleMinutes` (설정 파일) | 얼마나 **오래 놀아야** 죽이는가 | 60분 |
+
+즉 `--interval-min 90` + `idleMinutes 60` = **90분마다 확인해서, 60분 넘게 무활동인 세션만 종료**.
+정리 주기를 짧게 해도 60분 안 논 세션은 절대 안 죽습니다.
 
 > **sudo 불필요.** LaunchAgent 는 사용자 권한으로 돕니다. 프로세스 종료에 root 가 필요 없기 때문입니다.
 > cleanup 은 무인 실행이라 `--no-purge` 로 등록됩니다 (sudo 프롬프트가 뜨면 영원히 멈추므로).

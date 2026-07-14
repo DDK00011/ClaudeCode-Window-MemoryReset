@@ -33,14 +33,18 @@ info() { print -r -- "${C_GRAY}$*${C_RESET}" }
 head1(){ print -r -- "${C_CYAN}$*${C_RESET}" }
 
 ACTION=install
-INTERVAL_HOURS=3
+# cleanup 실행 간격은 분 단위로 보관한다 — 시간 단위(정수)만 받으면 90분 같은 값을
+# 표현할 수 없다. --interval-hours 는 하위호환으로 남겨두고 내부에서 분으로 환산한다.
+CLEANUP_INTERVAL_MIN=180
 
 while (( $# > 0 )); do
   case "$1" in
     --remove|--uninstall) ACTION=remove ;;
     --status)             ACTION=status ;;
-    --interval-hours)     INTERVAL_HOURS="${2:-3}"; shift ;;
-    --interval-hours=*)   INTERVAL_HOURS="${1#*=}" ;;
+    --interval-min)       CLEANUP_INTERVAL_MIN="${2:-180}"; shift ;;
+    --interval-min=*)     CLEANUP_INTERVAL_MIN="${1#*=}" ;;
+    --interval-hours)     CLEANUP_INTERVAL_MIN=$(( ${2:-3} * 60 )); shift ;;
+    --interval-hours=*)   CLEANUP_INTERVAL_MIN=$(( ${1#*=} * 60 )) ;;
     -h|--help)
       cat <<'EOF'
 사용법: ./install-launchd.sh [옵션]
@@ -48,7 +52,8 @@ while (( $# > 0 )); do
   (옵션 없음)             tracker + cleanup LaunchAgent 등록
   --remove                둘 다 해제
   --status                등록/실행 상태 확인
-  --interval-hours N      cleanup 실행 간격 (기본 3시간)
+  --interval-min N        cleanup 실행 간격 (분). 기본 180 (=3시간). 예: 90 → 1시간 30분
+  --interval-hours N      같은 뜻의 시간 단위 (정수만). --interval-min 이 더 정밀
 
 등록되는 것:
   com.claudecode.memoryreset.tracker  — trackIntervalMin(기본 5분) 간격, CPU 스냅샷 + 알림
@@ -62,8 +67,11 @@ EOF
   shift
 done
 
-[[ "$INTERVAL_HOURS" =~ '^[0-9]+$' ]] || { err "[X] --interval-hours 는 정수여야 합니다"; exit 1 }
-(( INTERVAL_HOURS < 1 )) && INTERVAL_HOURS=1
+[[ "$CLEANUP_INTERVAL_MIN" =~ '^[0-9]+$' ]] || { err "[X] 간격은 정수(분)여야 합니다"; exit 1 }
+(( CLEANUP_INTERVAL_MIN < 5 )) && {
+  warn "[!] 간격이 너무 짧습니다 (${CLEANUP_INTERVAL_MIN}분) — 최소 5분으로 올립니다"
+  CLEANUP_INTERVAL_MIN=5
+}
 
 # launchctl bootstrap/bootout (최신) → load/unload (구버전) 폴백
 lc_load() {
@@ -185,12 +193,16 @@ info "     → ${INTERVAL_MIN}분 간격 --track-activity (CPU 스냅샷 + 임�
 info "     → 절대 프로세스를 종료하지 않습니다 (read-only)"
 
 # 2) cleanup — idle/고아만 종료. 무인이므로 --no-purge (sudo 프롬프트 방지)
-write_plist "$CLEANUP_PLIST" "$CLEANUP_LABEL" $(( INTERVAL_HOURS * 3600 )) \
+write_plist "$CLEANUP_PLIST" "$CLEANUP_LABEL" $(( CLEANUP_INTERVAL_MIN * 60 )) \
   "--idle-only" "--skip-confirmation" "--no-purge"
 plutil -lint "$CLEANUP_PLIST" >/dev/null 2>&1 || { err "[X] cleanup plist 생성 실패"; exit 1 }
 lc_load "$CLEANUP_PLIST" "$CLEANUP_LABEL"
 ok "[OK] 자동 정리 등록: $CLEANUP_LABEL"
-info "     → ${INTERVAL_HOURS}시간 간격 --idle-only (idle/고아만 종료, 활성 세션 보존)"
+if (( CLEANUP_INTERVAL_MIN % 60 == 0 )); then
+  info "     → $(( CLEANUP_INTERVAL_MIN / 60 ))시간 간격 --idle-only (idle/고아만 종료, 활성 세션 보존)"
+else
+  info "     → ${CLEANUP_INTERVAL_MIN}분 간격 ($(( CLEANUP_INTERVAL_MIN / 60 ))시간 $(( CLEANUP_INTERVAL_MIN % 60 ))분) --idle-only (idle/고아만 종료, 활성 세션 보존)"
+fi
 info "     → --no-purge: 무인 실행 중 sudo 프롬프트로 멈추는 것을 방지"
 info "        (프로세스 종료 자체는 sudo 가 필요 없어 정상 동작합니다)"
 
