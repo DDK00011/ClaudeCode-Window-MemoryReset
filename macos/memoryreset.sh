@@ -26,7 +26,7 @@ emulate -L zsh
 setopt no_nomatch pipe_fail
 
 SCRIPT_DIR="${0:A:h}"
-VERSION="1.4.1-macos"
+VERSION="1.5.0-macos"
 
 # ── Defaults ───────────────────────────────────────────────────────────
 GRACEFUL_TIMEOUT_SEC=8
@@ -246,6 +246,7 @@ cputime_to_sec() {
 
 snapshot_processes() {
   PROC_CMD=(); PROC_PPID=(); PROC_RSS=(); PROC_CPUT=(); PROC_PIDS=()
+  _DAEMON_ALIVE=""   # daemon liveness cache must match snapshot lifetime
   local pid ppid rss cput cmd
   # command= must be last — the last read variable receives all remaining argv(including spaces).
   while read -r pid ppid rss cput cmd; do
@@ -345,6 +346,46 @@ is_claude_daemon() {
   return 1
 }
 
+# Protection list (protected array in tracker-settings.json) — partial command line match
+is_protected() {
+  local cmd="$1" pat
+  for pat in $SET_PROTECTED; do
+    [[ -n "$pat" && "$cmd" == *"$pat"* ]] && return 0
+  done
+  return 1
+}
+
+# claude daemon is currently running — scan only 1 time per snapshot (result cache)
+typeset -g _DAEMON_ALIVE=""
+claude_daemon_running() {
+  if [[ -z "$_DAEMON_ALIVE" ]]; then
+    _DAEMON_ALIVE=0
+    local q
+    for q in $PROC_PIDS; do
+      is_claude_daemon "${PROC_CMD[$q]:-}" && { _DAEMON_ALIVE=1; break }
+    done
+  fi
+  (( _DAEMON_ALIVE ))
+}
+
+# Process elapsed time(seconds) — parse ps etime ([[dd-]hh:]mm:ss). Return non-0 on failure.
+proc_age_sec() {
+  local e d=0 hms h=0 m s
+  e=$(ps -o etime= -p "$1" 2>/dev/null); e="${e//[[:space:]]/}"
+  [[ -n "$e" ]] || return 1
+  hms="$e"
+  [[ "$e" == *-* ]] && { d="${e%%-*}"; hms="${e#*-}" }
+  local -a parts=("${(@s/:/)hms}")
+  case ${#parts} in
+    3) h=${parts[1]}; m=${parts[2]}; s=${parts[3]} ;;
+    2) m=${parts[1]}; s=${parts[2]} ;;
+    *) return 1 ;;
+  esac
+  [[ "$d" == <-> && "$h" == <-> && "$m" == <-> && "$s" == <-> ]] || return 1
+  # 10# — prevent etime values such as "08" from being interpreted as base 8
+  print -- $(( ((10#$d * 24 + 10#$h) * 60 + 10#$m) * 60 + 10#$s ))
+}
+
 categorize() {
   local cmd="$1"
   # Order matters: check daemon/helper signatures before path patterns.
@@ -404,6 +445,14 @@ is_orphan() {
   local ppid="${PROC_PPID[$pid]:-}"
   [[ "$ppid" == "1" ]] || return 1          # Parent alive → not orphan
   is_claude_daemon "$cmd" && return 1       # daemon with normal detach → not orphan
+  # daemon-managed helper (bg-spare / pty-host / daemon socket user) is managed by daemon
+  # detach spawning makes PPID=1 normal. Measured: even while daemon is alive
+  # pty-host PPID for hosting an active session was 1 (2026-07-14 false positive incident).
+  # → detect as orphan only when daemon has actually disappeared.
+  case "$cmd" in
+    *cc-daemon-*|*"/.claude/daemon"*|*claude\ bg-*|*claude\ pty-*|*--bg-pty-host*|*--bg-spare*)
+      claude_daemon_running && return 1 ;;
+  esac
   return 0
 }
 
@@ -483,6 +532,8 @@ get_targets() {
 # 5. Settings (tracker-settings.json) — read with plutil (built into macOS, jq unnecessary)
 # ════════════════════════════════════════════════════════════════════
 typeset -g SET_IDLE_MIN=60 SET_CPU_PCT=0.5 SET_TRACK_INTERVAL=5
+typeset -g SET_MIN_AGE_MIN=30 SET_MIN_FREE_PCT=25
+typeset -ga SET_PROTECTED=()
 typeset -g SET_ALERT_ENABLED=0 SET_TG_TOKEN="" SET_TG_CHAT=""
 typeset -g SET_RAM_PCT=10 SET_IDLE_COUNT=10 SET_IDLE_MEM_MB=4096 SET_COOLDOWN_MIN=30
 
@@ -499,6 +550,16 @@ load_settings() {
   SET_IDLE_MIN=$(json_get idleMinutes 60)
   SET_CPU_PCT=$(json_get cpuThresholdPct 0.5)
   SET_TRACK_INTERVAL=$(json_get trackIntervalMin 5)
+  SET_MIN_AGE_MIN=$(json_get minAgeMinutes 30)
+  SET_MIN_FREE_PCT=$(json_get minFreePct 25)
+  SET_PROTECTED=()
+  local i=0 pat
+  # Detect array end only from plutil exit code — break on an empty string element
+  # silently discards all following patterns
+  while pat=$(plutil -extract "protected.$i" raw -o - "$SETTINGS_FILE" 2>/dev/null); do
+    [[ -n "$pat" ]] && SET_PROTECTED+=("$pat")
+    (( ++i > 64 )) && break
+  done
   local ae; ae=$(json_get alert.enabled false)
   [[ "$ae" == "true" || "$ae" == "1" ]] && SET_ALERT_ENABLED=1 || SET_ALERT_ENABLED=0
   SET_TG_TOKEN=$(json_get alert.telegramBotToken "")
@@ -517,20 +578,26 @@ load_settings() {
 #    Accumulate activity history over time and clean up only processes with continuous inactivity for idleMinutes.
 #
 #    State file is TSV (instead of Windows JSON) — for atomic/safe shell handling.
-#    Fields: pid  startToken  name  firstTracked  lastActive  lastCpuSec  lastSeen  lastRatePct  rssKB
+#    Fields: pid  startToken  name  firstTracked  lastActive  lastCpuSec  lastSeen  lastRatePct  rssKB  cmdHash
 # ════════════════════════════════════════════════════════════════════
-typeset -gA ST_START ST_NAME ST_FIRST ST_ACTIVE ST_CPUSEC ST_SEEN ST_RATE ST_RSS
+typeset -gA ST_START ST_NAME ST_FIRST ST_ACTIVE ST_CPUSEC ST_SEEN ST_RATE ST_RSS ST_CMDHASH
 
 read_state() {
-  ST_START=(); ST_NAME=(); ST_FIRST=(); ST_ACTIVE=(); ST_CPUSEC=(); ST_SEEN=(); ST_RATE=(); ST_RSS=()
+  ST_START=(); ST_NAME=(); ST_FIRST=(); ST_ACTIVE=(); ST_CPUSEC=(); ST_SEEN=(); ST_RATE=(); ST_RSS=(); ST_CMDHASH=()
   [[ -f "$STATE_FILE" ]] || return 0
-  local pid stok name first active cpusec seen rate rss
-  while IFS=$'\t' read -r pid stok name first active cpusec seen rate rss; do
+  local pid stok name first active cpusec seen rate rss chash
+  while IFS=$'\t' read -r pid stok name first active cpusec seen rate rss chash; do
     [[ "$pid" =~ '^[0-9]+$' ]] || continue
+    # "-" is an empty field sentinel — TAB is an IFS whitespace character, so consecutive tabs (empty fields)
+    # read merges them into one and shifts columns. Fill with "-" when writing and restore here.
+    [[ "$stok"  == "-" ]] && stok=""
+    [[ "$rate"  == "-" ]] && rate=""
+    [[ "$chash" == "-" ]] && chash=""
     ST_START[$pid]="$stok";  ST_NAME[$pid]="$name"
     ST_FIRST[$pid]="$first"; ST_ACTIVE[$pid]="$active"
     ST_CPUSEC[$pid]="$cpusec"; ST_SEEN[$pid]="$seen"
     ST_RATE[$pid]="$rate";   ST_RSS[$pid]="$rss"
+    ST_CMDHASH[$pid]="$chash"
   done < "$STATE_FILE"
 }
 
@@ -539,18 +606,19 @@ write_state() {
   local p
   : > "$tmp" 2>/dev/null || { tracker_log "state save failed: cannot create $tmp"; return 1 }
   for p in ${(k)ST_START}; do
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-      "$p" "${ST_START[$p]}" "${ST_NAME[$p]}" "${ST_FIRST[$p]}" "${ST_ACTIVE[$p]}" \
-      "${ST_CPUSEC[$p]}" "${ST_SEEN[$p]}" "${ST_RATE[$p]}" "${ST_RSS[$p]}" >> "$tmp"
+    # Use "-" as sentinel for empty values — consecutive tabs merge in read and shift columns (see read_state)
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$p" "${ST_START[$p]:--}" "${ST_NAME[$p]:--}" "${ST_FIRST[$p]:--}" "${ST_ACTIVE[$p]:--}" \
+      "${ST_CPUSEC[$p]:--}" "${ST_SEEN[$p]:--}" "${ST_RATE[$p]:--}" "${ST_RSS[$p]:--}" \
+      "${ST_CMDHASH[$p]:--}" >> "$tmp"
   done
   mv -f "$tmp" "$STATE_FILE" 2>/dev/null || { rm -f "$tmp"; tracker_log "state atomic replacement failed"; return 1 }
 }
 
-ncpu() { sysctl -n hw.logicalcpu 2>/dev/null || print 1 }
+cmd_hash() { print -r -- "$1" | md5 -q 2>/dev/null }
 
 update_activity_state() {
   local now=$(date +%s)
-  local cores=$(ncpu); (( cores < 1 )) && cores=1
   read_state
   get_targets
 
@@ -560,25 +628,41 @@ update_activity_state() {
     seen_now[$p]=1
     local cmd="${PROC_CMD[$p]}"
     local stok=""; stok=$(proc_start_token "$p") || stok=""
+    local chash="$(cmd_hash "$cmd")"
     local cpusec="${PROC_CPUT[$p]:-0}"
 
-    # Codex uses tree-wide CPU to determine activity (same as Windows version)
-    if is_codex_cli "$cmd"; then
-      local d=""
-      for d in $(descendants_of "$p"); do
-        cpusec=$(( cpusec + ${PROC_CPUT[$d]:-0} ))
-      done
-    fi
+    # Determine activity from full tree CPU — Claude also does actual work in children (tool execution and more)
+    # so, like Codex, descendant CPU must be summed to detect activity.
+    local d=""
+    for d in $(descendants_of "$p"); do
+      cpusec=$(( cpusec + ${PROC_CPUT[$d]:-0} ))
+    done
 
-    if [[ -n "${ST_START[$p]:-}" && "${ST_START[$p]}" == "$stok" ]]; then
-      # Same process — determine activity from CPU delta
+    if [[ -n "${ST_START[$p]:-}" && "${ST_START[$p]}" == "$stok" \
+          && "${ST_CMDHASH[$p]:-}" == "$chash" ]]; then
+      # Same process + same command line — determine activity from CPU delta
       local last_seen="${ST_SEEN[$p]}"
       local last_cpu="${ST_CPUSEC[$p]}"
       local dsec=$(( now - last_seen ))
       if (( dsec > 0 )); then
+        # An observation gap (sleep/tracker stopped) is not idle time — shift
+        # first/active clocks forward by the gap to exclude downtime from idle calculation.
+        local gap_limit=$(( SET_TRACK_INTERVAL * 60 * 3 ))
+        if (( dsec > gap_limit )); then
+          local shift_sec=$(( dsec - SET_TRACK_INTERVAL * 60 ))
+          ST_FIRST[$p]=$(( ${ST_FIRST[$p]} + shift_sec ))
+          ST_ACTIVE[$p]=$(( ${ST_ACTIVE[$p]} + shift_sec ))
+          (( ST_FIRST[$p]  > now )) && ST_FIRST[$p]=$now
+          (( ST_ACTIVE[$p] > now )) && ST_ACTIVE[$p]=$now
+          tracker_log "gap: pid=$p observation gap ${dsec}s → adjust idle clock +${shift_sec}s"
+        fi
         local dcpu=$(( cpusec - last_cpu ))
-        (( dcpu < 0 )) && dcpu=0
-        local rate=$(( dcpu / dsec / cores * 100 ))
+        # Full tree CPU total decreased = a child using CPU just exited — that alone is
+        # evidence of activity in the prior interval (if discarded as 0, a child that worked briefly then exited is missed)
+        (( dcpu < 0 )) && { ST_ACTIVE[$p]=$now; dcpu=0 }
+        # Single core % basis — dividing by total core count makes API wait focused sessions
+        # never register as active (0.5% threshold on 10 cores = CPU 15 seconds/5 minutes).
+        local -F rate=$(( dcpu * 100.0 / dsec ))
         ST_RATE[$p]=$(printf '%.3f' $rate)
         if (( rate >= SET_CPU_PCT )); then
           ST_ACTIVE[$p]=$now
@@ -588,7 +672,10 @@ update_activity_state() {
       ST_SEEN[$p]=$now
       ST_RSS[$p]="${PROC_RSS[$p]:-0}"
     else
-      # New or reused PID (start time mismatch) → reset history
+      # New / PID reuse (start time mismatch) / command line change → reset history.
+      # Without command line change detection, bg-spare prestarted by the daemon
+      # inherits hours of idle history unchanged when it becomes a session host
+      # "Newly opened session" dies in the next sweep (measured incident in 2026-07).
       ST_START[$p]="$stok"
       ST_NAME[$p]="$(categorize "$cmd")"
       ST_FIRST[$p]=$now
@@ -597,6 +684,7 @@ update_activity_state() {
       ST_SEEN[$p]=$now
       ST_RATE[$p]=""
       ST_RSS[$p]="${PROC_RSS[$p]:-0}"
+      ST_CMDHASH[$p]="$chash"
     fi
   done
 
@@ -604,7 +692,7 @@ update_activity_state() {
   for p in ${(k)ST_START}; do
     [[ -z "${seen_now[$p]:-}" ]] && {
       unset "ST_START[$p]" "ST_NAME[$p]" "ST_FIRST[$p]" "ST_ACTIVE[$p]" \
-            "ST_CPUSEC[$p]" "ST_SEEN[$p]" "ST_RATE[$p]" "ST_RSS[$p]"
+            "ST_CPUSEC[$p]" "ST_SEEN[$p]" "ST_RATE[$p]" "ST_RSS[$p]" "ST_CMDHASH[$p]"
     }
   done
   write_state
@@ -633,6 +721,17 @@ get_reclaim_candidates() {
   read_state
   get_targets
   for p in $TARGET_PIDS; do
+    local cmd="${PROC_CMD[$p]:-}"
+    # Exclude shared daemon from candidates — killing it orphans helpers for all sessions
+    is_claude_daemon "$cmd" && continue
+    # Protection list (persistent listeners/services, etc.)
+    is_protected "$cmd" && continue
+    # Minimum age gate — prohibit just started processes as candidates through any path (idle/orphan).
+    # If age cannot be determined, preserve conservatively.
+    local age=""
+    age=$(proc_age_sec "$p") || age=""
+    [[ -z "$age" ]] && continue
+    (( age < SET_MIN_AGE_MIN * 60 )) && continue
     local isidle=0 isorph=0
     is_process_idle "$p" "$now" && isidle=1
     is_orphan "$p" && isorph=1
@@ -766,6 +865,11 @@ stop_targets() {
       run_log "skip: active-codex pid=$p"
       continue
     fi
+    if is_protected "${PROC_CMD[$p]:-}"; then
+      ok " [SKIP] Protection list (protected) → PID=$p"
+      run_log "skip: protected pid=$p"
+      continue
+    fi
     filtered+=("$p")
   done
   targets=($filtered)
@@ -826,6 +930,8 @@ stop_targets() {
     for d in $(descendants_of "$p"); do
       [[ -n "${protect[$d]:-}" ]] && continue
       [[ -n "${SELF_CHAIN[$d]:-}" ]] && continue
+      is_protected "${PROC_CMD[$d]:-}" && continue
+      is_blacklisted "${PROC_CMD[$d]:-}" && continue
       kill -KILL "$d" 2>/dev/null
     done
     if kill -KILL "$p" 2>/dev/null; then
@@ -1118,7 +1224,30 @@ head1 "── Processes to terminate ──"
 
 # ── --idle-only: limit to tracking-based candidates only ─────────────────────────────
 if (( IDLE_ONLY )); then
+  # Boot warmup — do not sweep until idle observation accumulates for idleMinutes.
+  # (reboot-only guard — sleep wake does not change kern.boottime, so
+  #  update_activity_state corrects observation gaps)
+  now_ts=$(date +%s)
+  # sed requires a comma anchor: greedy .* lets "usec = " rematch as "sec = ",
+  # a microsecond capture bug existed (silently disabling the entire guard)
+  boot_sec=$(sysctl -n kern.boottime 2>/dev/null | sed -E 's/.*\{ *sec = ([0-9]+),.*/\1/')
+  if [[ "$boot_sec" =~ '^[0-9]+$' ]] && (( now_ts - boot_sec < SET_IDLE_MIN * 60 )); then
+    uptime_min=$(( (now_ts - boot_sec) / 60 ))
+    info " [i] ${uptime_min}min after boot — idle cleanup skipped before warmup (${SET_IDLE_MIN}min)."
+    run_log "targets: skipped boot-warmup uptimeMin=$uptime_min idleMinutes=$SET_IDLE_MIN"
+    run_log "=== run complete (boot-warmup skip) ==="
+    exit 0
+  fi
+  # Always update observations even if sweep is skipped — every 90 minutes
+  # this path must build history for idle detection
   update_activity_state
+  # Available memory gate — no reason to kill if available RAM is sufficient.
+  if (( MEM_PCT_FREE >= SET_MIN_FREE_PCT )); then
+    info "$(printf ' [i] Available RAM %.1f%% ≥ gate %s%% — skip idle cleanup.' $MEM_PCT_FREE $SET_MIN_FREE_PCT)"
+    run_log "$(printf 'targets: skipped memory-ok freePct=%.1f gatePct=%s' $MEM_PCT_FREE $SET_MIN_FREE_PCT)"
+    run_log "=== run complete (memory-ok skip) ==="
+    exit 0
+  fi
   get_reclaim_candidates
   typeset -A cand_set
   for p in $CAND_PIDS; do cand_set[$p]=1; done
@@ -1136,7 +1265,7 @@ fi
 
 run_log "targets: finalCount=${#TARGET_PIDS}"
 for p in $TARGET_PIDS; do
-  run_log "target: pid=$p ppid=${PROC_PPID[$p]} cat=$(categorize "${PROC_CMD[$p]}") rssKB=${PROC_RSS[$p]} cmd=${PROC_CMD[$p]}"
+  run_log "target: pid=$p ppid=${PROC_PPID[$p]} cat=$(categorize "${PROC_CMD[$p]}") idleMin=${CAND_IDLEMIN[$p]:--} rssKB=${PROC_RSS[$p]} cmd=${PROC_CMD[$p]}"
 done
 
 if (( ${#TARGET_PIDS} == 0 )); then

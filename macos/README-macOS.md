@@ -192,7 +192,8 @@ macOS immediately **reparents children to launchd(PID 1)** when their parent die
 
 | Situation | Determination |
 |---|---|
-| claude helper(`bg-spare`/`bg-pty-host`) with **PPID=1** | **Orphan** — the daemon died |
+| claude helper(`bg-spare`/`bg-pty-host`) with **PPID=1**, and `claude daemon` is also dead | **orphan** |
+| claude helper with PPID=1, **daemon is alive** | **normal** — spawned detached by daemon (v1.5.0) |
 | `claude daemon` with PPID=1 | **normal** — inherently detached daemon |
 | Parent is alive | **not orphan** (conservative — prevents false positives on active sessions) |
 
@@ -200,11 +201,29 @@ macOS immediately **reparents children to launchd(PID 1)** when their parent die
 > Using it directly on macOS false-positives every login shell(argv[0] is `-zsh`) and terminal emulator.
 > This was a false positive measured during development, so the rule itself was removed.
 
+> **v1.5.0 change**: Measurement confirmed that, while daemon is alive, the PPID of pty-host hosting active sessions is
+> 1 (2026-07 false-positive incident), so "verify daemon is alive" was added to helper orphan detection
+> condition. Also, on the idle sweep(`--idle-only`) path, processes below initial `minAgeMinutes` (default
+> 30 min) are not termination candidates (does not apply to manual `--orphans-only`/default mode).
+
 ### 4. Preserve active sessions (`--idle-only`)
 
 claude active sessions are also at 0% CPU while waiting for input. Killing based only on "low CPU now" kills active sessions.
 So it **accumulates activity history over time** and cleans up only sessions with **continuous** inactivity for `idleMinutes`.
 Active sessions necessarily use CPU during that time, so they are preserved. (Same principle as Windows version)
+
+In v1.5.0, this determination was substantially revised:
+
+- **CPU rate is based on a single core.** Previously, it was divided by the total core count (with 10 cores, every 5 minutes
+  15 CPU seconds were required), so API-wait-heavy sessions were forever classified as "inactive". Now the threshold
+  `cpuThresholdPct 0.5` = 1.5 CPU seconds per 5 minutes. Claude also sums descendant tree CPU like Codex.
+- **Reset history on command-line changes** — When a `bg-spare` pre-launched by daemon becomes the session host,
+  argv changes, but it previously inherited several hours of idle history, killing a "just opened session".
+- **Sleep time is not idle** — When an observation gap(sleep/tracker stopped) exceeds 3 times the tracking interval,
+  it advances the idle clock by that amount. Right after boot, the sweep itself is skipped for `idleMinutes`.
+- **Free-memory gate** — If available RAM is at least `minFreePct`(default 25%), cleanup is skipped entirely.
+- **Protected list** — Processes matching the `protected` array(command-line partial match) in `tracker-settings.json`
+  are never auto-terminated (for persistent listeners/services).
 
 ### 5. Verification
 

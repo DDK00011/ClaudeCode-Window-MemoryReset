@@ -10,6 +10,15 @@
   "trackIntervalMin": 5,
   "_trackIntervalMin": "Background tracking (snapshot) interval (minutes). install-launchd.sh registers --track-activity LaunchAgent at this interval.",
 
+  "minAgeMinutes": 30,
+  "_minAgeMinutes": "Processes younger than this time (minutes) are not termination candidates through either idle/orphan path (protect newly opened sessions).",
+
+  "minFreePct": 25,
+  "_minFreePct": "During --idle-only sweep, skip cleanup entirely if available RAM is at least this % (no reason to kill with memory available).",
+
+  "protected": [],
+  "_protected": "Array of partial command-line match patterns. Matching processes are never terminated automatically. Example: [\"my-always-on-listener\", \"/path/to/service/\"]",
+
   "alert": {
     "enabled": false,
     "telegramBotToken": "",
