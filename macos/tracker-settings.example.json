@@ -10,6 +10,15 @@
   "trackIntervalMin": 5,
   "_trackIntervalMin": "백그라운드 추적(스냅샷) 주기(분). install-launchd.sh 가 이 간격으로 --track-activity LaunchAgent 를 등록.",
 
+  "minAgeMinutes": 30,
+  "_minAgeMinutes": "시작한 지 이 시간(분) 미만인 프로세스는 idle/고아 어느 경로로도 종료 후보가 되지 않음 (방금 연 세션 보호).",
+
+  "minFreePct": 25,
+  "_minFreePct": "--idle-only 스윕 시 가용 RAM 이 이 % 이상이면 정리를 통째로 생략 (여유 있는데 죽일 이유 없음).",
+
+  "protected": [],
+  "_protected": "커맨드라인 부분 일치 패턴 배열. 매칭되는 프로세스는 절대 자동 종료하지 않음. 예: [\"my-always-on-listener\", \"/path/to/service/\"]",
+
   "alert": {
     "enabled": false,
     "telegramBotToken": "",

@@ -26,7 +26,7 @@ emulate -L zsh
 setopt no_nomatch pipe_fail
 
 SCRIPT_DIR="${0:A:h}"
-VERSION="1.4.1-macos"
+VERSION="1.5.0-macos"
 
 # ── 기본값 ───────────────────────────────────────────────────────────
 GRACEFUL_TIMEOUT_SEC=8
@@ -246,6 +246,7 @@ cputime_to_sec() {
 
 snapshot_processes() {
   PROC_CMD=(); PROC_PPID=(); PROC_RSS=(); PROC_CPUT=(); PROC_PIDS=()
+  _DAEMON_ALIVE=""   # daemon 생존 캐시는 스냅샷 수명과 일치해야 함
   local pid ppid rss cput cmd
   # command= 는 반드시 마지막 — read 의 마지막 변수가 나머지 전부(공백 포함 argv)를 받는다.
   while read -r pid ppid rss cput cmd; do
@@ -345,6 +346,46 @@ is_claude_daemon() {
   return 1
 }
 
+# 보호 목록 (tracker-settings.json 의 protected 배열) — 커맨드라인 부분 일치
+is_protected() {
+  local cmd="$1" pat
+  for pat in $SET_PROTECTED; do
+    [[ -n "$pat" && "$cmd" == *"$pat"* ]] && return 0
+  done
+  return 1
+}
+
+# claude daemon 이 현재 떠 있는가 — 스냅샷 당 1회만 스캔 (결과 캐시)
+typeset -g _DAEMON_ALIVE=""
+claude_daemon_running() {
+  if [[ -z "$_DAEMON_ALIVE" ]]; then
+    _DAEMON_ALIVE=0
+    local q
+    for q in $PROC_PIDS; do
+      is_claude_daemon "${PROC_CMD[$q]:-}" && { _DAEMON_ALIVE=1; break }
+    done
+  fi
+  (( _DAEMON_ALIVE ))
+}
+
+# 프로세스 경과 시간(초) — ps etime ([[dd-]hh:]mm:ss) 파싱. 실패 시 비-0 반환.
+proc_age_sec() {
+  local e d=0 hms h=0 m s
+  e=$(ps -o etime= -p "$1" 2>/dev/null); e="${e//[[:space:]]/}"
+  [[ -n "$e" ]] || return 1
+  hms="$e"
+  [[ "$e" == *-* ]] && { d="${e%%-*}"; hms="${e#*-}" }
+  local -a parts=("${(@s/:/)hms}")
+  case ${#parts} in
+    3) h=${parts[1]}; m=${parts[2]}; s=${parts[3]} ;;
+    2) m=${parts[1]}; s=${parts[2]} ;;
+    *) return 1 ;;
+  esac
+  [[ "$d" == <-> && "$h" == <-> && "$m" == <-> && "$s" == <-> ]] || return 1
+  # 10# — etime 의 "08" 같은 값이 8진수로 해석되는 것 방지
+  print -- $(( ((10#$d * 24 + 10#$h) * 60 + 10#$m) * 60 + 10#$s ))
+}
+
 categorize() {
   local cmd="$1"
   # 순서 주의: daemon/helper 시그니처를 경로 패턴보다 먼저 본다.
@@ -404,6 +445,14 @@ is_orphan() {
   local ppid="${PROC_PPID[$pid]:-}"
   [[ "$ppid" == "1" ]] || return 1          # 부모 생존 → 고아 아님
   is_claude_daemon "$cmd" && return 1       # detach 가 정상인 데몬 → 고아 아님
+  # daemon 관리 helper (bg-spare / pty-host / daemon 소켓 사용자)는 daemon 이
+  # detach 스폰하므로 PPID=1 이 정상 상태다. 실측: daemon 이 살아있는 동안에도
+  # 활성 세션을 호스팅하는 pty-host 의 PPID 는 1 이었다 (2026-07-14 오탐 사고).
+  # → daemon 이 실제로 사라졌을 때만 고아로 판정한다.
+  case "$cmd" in
+    *cc-daemon-*|*"/.claude/daemon"*|*claude\ bg-*|*claude\ pty-*|*--bg-pty-host*|*--bg-spare*)
+      claude_daemon_running && return 1 ;;
+  esac
   return 0
 }
 
@@ -483,6 +532,8 @@ get_targets() {
 # 5. 설정 (tracker-settings.json) — plutil 로 읽음 (macOS 내장, jq 불필요)
 # ════════════════════════════════════════════════════════════════════
 typeset -g SET_IDLE_MIN=60 SET_CPU_PCT=0.5 SET_TRACK_INTERVAL=5
+typeset -g SET_MIN_AGE_MIN=30 SET_MIN_FREE_PCT=25
+typeset -ga SET_PROTECTED=()
 typeset -g SET_ALERT_ENABLED=0 SET_TG_TOKEN="" SET_TG_CHAT=""
 typeset -g SET_RAM_PCT=10 SET_IDLE_COUNT=10 SET_IDLE_MEM_MB=4096 SET_COOLDOWN_MIN=30
 
@@ -499,6 +550,16 @@ load_settings() {
   SET_IDLE_MIN=$(json_get idleMinutes 60)
   SET_CPU_PCT=$(json_get cpuThresholdPct 0.5)
   SET_TRACK_INTERVAL=$(json_get trackIntervalMin 5)
+  SET_MIN_AGE_MIN=$(json_get minAgeMinutes 30)
+  SET_MIN_FREE_PCT=$(json_get minFreePct 25)
+  SET_PROTECTED=()
+  local i=0 pat
+  # 배열 끝은 plutil 의 종료 코드로만 판정 — 빈 문자열 요소에서 break 하면
+  # 그 뒤의 패턴이 전부 조용히 버려진다
+  while pat=$(plutil -extract "protected.$i" raw -o - "$SETTINGS_FILE" 2>/dev/null); do
+    [[ -n "$pat" ]] && SET_PROTECTED+=("$pat")
+    (( ++i > 64 )) && break
+  done
   local ae; ae=$(json_get alert.enabled false)
   [[ "$ae" == "true" || "$ae" == "1" ]] && SET_ALERT_ENABLED=1 || SET_ALERT_ENABLED=0
   SET_TG_TOKEN=$(json_get alert.telegramBotToken "")
@@ -517,20 +578,26 @@ load_settings() {
 #    누적해서 idleMinutes 연속 무활동인 것만 정리한다.
 #
 #    상태 파일은 TSV (Windows 판의 JSON 대신) — 셸에서 원자적/안전하게 다루기 위함.
-#    필드: pid  startToken  name  firstTracked  lastActive  lastCpuSec  lastSeen  lastRatePct  rssKB
+#    필드: pid  startToken  name  firstTracked  lastActive  lastCpuSec  lastSeen  lastRatePct  rssKB  cmdHash
 # ════════════════════════════════════════════════════════════════════
-typeset -gA ST_START ST_NAME ST_FIRST ST_ACTIVE ST_CPUSEC ST_SEEN ST_RATE ST_RSS
+typeset -gA ST_START ST_NAME ST_FIRST ST_ACTIVE ST_CPUSEC ST_SEEN ST_RATE ST_RSS ST_CMDHASH
 
 read_state() {
-  ST_START=(); ST_NAME=(); ST_FIRST=(); ST_ACTIVE=(); ST_CPUSEC=(); ST_SEEN=(); ST_RATE=(); ST_RSS=()
+  ST_START=(); ST_NAME=(); ST_FIRST=(); ST_ACTIVE=(); ST_CPUSEC=(); ST_SEEN=(); ST_RATE=(); ST_RSS=(); ST_CMDHASH=()
   [[ -f "$STATE_FILE" ]] || return 0
-  local pid stok name first active cpusec seen rate rss
-  while IFS=$'\t' read -r pid stok name first active cpusec seen rate rss; do
+  local pid stok name first active cpusec seen rate rss chash
+  while IFS=$'\t' read -r pid stok name first active cpusec seen rate rss chash; do
     [[ "$pid" =~ '^[0-9]+$' ]] || continue
+    # "-" 는 빈 필드 센티널 — TAB 은 IFS 공백문자라 연속 탭(빈 필드)이
+    # read 에서 하나로 접혀 컬럼이 밀린다. 쓰기 쪽에서 "-" 로 채우고 여기서 복원.
+    [[ "$stok"  == "-" ]] && stok=""
+    [[ "$rate"  == "-" ]] && rate=""
+    [[ "$chash" == "-" ]] && chash=""
     ST_START[$pid]="$stok";  ST_NAME[$pid]="$name"
     ST_FIRST[$pid]="$first"; ST_ACTIVE[$pid]="$active"
     ST_CPUSEC[$pid]="$cpusec"; ST_SEEN[$pid]="$seen"
     ST_RATE[$pid]="$rate";   ST_RSS[$pid]="$rss"
+    ST_CMDHASH[$pid]="$chash"
   done < "$STATE_FILE"
 }
 
@@ -539,18 +606,19 @@ write_state() {
   local p
   : > "$tmp" 2>/dev/null || { tracker_log "state 저장 실패: $tmp 생성 불가"; return 1 }
   for p in ${(k)ST_START}; do
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-      "$p" "${ST_START[$p]}" "${ST_NAME[$p]}" "${ST_FIRST[$p]}" "${ST_ACTIVE[$p]}" \
-      "${ST_CPUSEC[$p]}" "${ST_SEEN[$p]}" "${ST_RATE[$p]}" "${ST_RSS[$p]}" >> "$tmp"
+    # 빈 값은 "-" 센티널로 — 연속 탭은 read 에서 접혀 컬럼이 밀린다 (read_state 참고)
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$p" "${ST_START[$p]:--}" "${ST_NAME[$p]:--}" "${ST_FIRST[$p]:--}" "${ST_ACTIVE[$p]:--}" \
+      "${ST_CPUSEC[$p]:--}" "${ST_SEEN[$p]:--}" "${ST_RATE[$p]:--}" "${ST_RSS[$p]:--}" \
+      "${ST_CMDHASH[$p]:--}" >> "$tmp"
   done
   mv -f "$tmp" "$STATE_FILE" 2>/dev/null || { rm -f "$tmp"; tracker_log "state 원자적 교체 실패"; return 1 }
 }
 
-ncpu() { sysctl -n hw.logicalcpu 2>/dev/null || print 1 }
+cmd_hash() { print -r -- "$1" | md5 -q 2>/dev/null }
 
 update_activity_state() {
   local now=$(date +%s)
-  local cores=$(ncpu); (( cores < 1 )) && cores=1
   read_state
   get_targets
 
@@ -560,25 +628,41 @@ update_activity_state() {
     seen_now[$p]=1
     local cmd="${PROC_CMD[$p]}"
     local stok=""; stok=$(proc_start_token "$p") || stok=""
+    local chash="$(cmd_hash "$cmd")"
     local cpusec="${PROC_CPUT[$p]:-0}"
 
-    # Codex 는 트리 전체 CPU 로 활동 판정 (Windows 판과 동일)
-    if is_codex_cli "$cmd"; then
-      local d=""
-      for d in $(descendants_of "$p"); do
-        cpusec=$(( cpusec + ${PROC_CPUT[$d]:-0} ))
-      done
-    fi
+    # 트리 전체 CPU 로 활동 판정 — Claude 도 실제 작업은 자식(tool 실행 등)에서
+    # 돌기 때문에 Codex 처럼 자손 CPU 를 합산해야 활동이 잡힌다.
+    local d=""
+    for d in $(descendants_of "$p"); do
+      cpusec=$(( cpusec + ${PROC_CPUT[$d]:-0} ))
+    done
 
-    if [[ -n "${ST_START[$p]:-}" && "${ST_START[$p]}" == "$stok" ]]; then
-      # 동일 프로세스 — CPU delta 로 활동 여부 판정
+    if [[ -n "${ST_START[$p]:-}" && "${ST_START[$p]}" == "$stok" \
+          && "${ST_CMDHASH[$p]:-}" == "$chash" ]]; then
+      # 동일 프로세스 + 동일 커맨드라인 — CPU delta 로 활동 여부 판정
       local last_seen="${ST_SEEN[$p]}"
       local last_cpu="${ST_CPUSEC[$p]}"
       local dsec=$(( now - last_seen ))
       if (( dsec > 0 )); then
+        # 관측 공백(잠자기/트래커 중단)은 유휴 시간이 아니다 — 공백만큼
+        # first/active 시계를 앞으로 밀어 downtime 을 유휴 계산에서 제외한다.
+        local gap_limit=$(( SET_TRACK_INTERVAL * 60 * 3 ))
+        if (( dsec > gap_limit )); then
+          local shift_sec=$(( dsec - SET_TRACK_INTERVAL * 60 ))
+          ST_FIRST[$p]=$(( ${ST_FIRST[$p]} + shift_sec ))
+          ST_ACTIVE[$p]=$(( ${ST_ACTIVE[$p]} + shift_sec ))
+          (( ST_FIRST[$p]  > now )) && ST_FIRST[$p]=$now
+          (( ST_ACTIVE[$p] > now )) && ST_ACTIVE[$p]=$now
+          tracker_log "gap: pid=$p 관측 공백 ${dsec}s → 유휴 시계 +${shift_sec}s 보정"
+        fi
         local dcpu=$(( cpusec - last_cpu ))
-        (( dcpu < 0 )) && dcpu=0
-        local rate=$(( dcpu / dsec / cores * 100 ))
+        # 트리 CPU 합이 감소했다 = CPU 를 쓰던 자식이 방금 종료했다 — 그 자체가
+        # 직전 간격의 활동 증거다 (0 으로 버리면 짧게 일하고 사라진 자식이 안 보임)
+        (( dcpu < 0 )) && { ST_ACTIVE[$p]=$now; dcpu=0 }
+        # 단일 코어 기준 % — 전체 코어 수로 나누면 API 대기 위주 세션은
+        # 영원히 활동으로 안 잡힌다 (10코어에서 임계 0.5% = CPU 15초/5분).
+        local -F rate=$(( dcpu * 100.0 / dsec ))
         ST_RATE[$p]=$(printf '%.3f' $rate)
         if (( rate >= SET_CPU_PCT )); then
           ST_ACTIVE[$p]=$now
@@ -588,7 +672,10 @@ update_activity_state() {
       ST_SEEN[$p]=$now
       ST_RSS[$p]="${PROC_RSS[$p]:-0}"
     else
-      # 신규 또는 PID 재사용(시작 시각 불일치) → 이력 리셋
+      # 신규 / PID 재사용(시작 시각 불일치) / 커맨드라인 변경 → 이력 리셋.
+      # 커맨드라인 변경 감지가 없으면 daemon 이 미리 띄워둔 bg-spare 가
+      # 세션 호스트로 전환될 때 몇 시간짜리 유휴 이력을 그대로 상속받아
+      # "방금 연 세션"이 다음 스윕에서 죽는다 (2026-07 실측 사고).
       ST_START[$p]="$stok"
       ST_NAME[$p]="$(categorize "$cmd")"
       ST_FIRST[$p]=$now
@@ -597,6 +684,7 @@ update_activity_state() {
       ST_SEEN[$p]=$now
       ST_RATE[$p]=""
       ST_RSS[$p]="${PROC_RSS[$p]:-0}"
+      ST_CMDHASH[$p]="$chash"
     fi
   done
 
@@ -604,7 +692,7 @@ update_activity_state() {
   for p in ${(k)ST_START}; do
     [[ -z "${seen_now[$p]:-}" ]] && {
       unset "ST_START[$p]" "ST_NAME[$p]" "ST_FIRST[$p]" "ST_ACTIVE[$p]" \
-            "ST_CPUSEC[$p]" "ST_SEEN[$p]" "ST_RATE[$p]" "ST_RSS[$p]"
+            "ST_CPUSEC[$p]" "ST_SEEN[$p]" "ST_RATE[$p]" "ST_RSS[$p]" "ST_CMDHASH[$p]"
     }
   done
   write_state
@@ -633,6 +721,17 @@ get_reclaim_candidates() {
   read_state
   get_targets
   for p in $TARGET_PIDS; do
+    local cmd="${PROC_CMD[$p]:-}"
+    # 공유 daemon 은 후보 제외 — 죽이면 전 세션 helper 가 고아화되는 연쇄 사고
+    is_claude_daemon "$cmd" && continue
+    # 보호 목록 (상시 리스너/서비스 등)
+    is_protected "$cmd" && continue
+    # 최소 나이 게이트 — 방금 시작한 프로세스는 어떤 경로(idle/고아)로도 후보 금지.
+    # 나이를 알 수 없으면 보수적으로 보존한다.
+    local age=""
+    age=$(proc_age_sec "$p") || age=""
+    [[ -z "$age" ]] && continue
+    (( age < SET_MIN_AGE_MIN * 60 )) && continue
     local isidle=0 isorph=0
     is_process_idle "$p" "$now" && isidle=1
     is_orphan "$p" && isorph=1
@@ -766,6 +865,11 @@ stop_targets() {
       run_log "skip: active-codex pid=$p"
       continue
     fi
+    if is_protected "${PROC_CMD[$p]:-}"; then
+      ok " [SKIP] 보호 목록(protected) → PID=$p"
+      run_log "skip: protected pid=$p"
+      continue
+    fi
     filtered+=("$p")
   done
   targets=($filtered)
@@ -826,6 +930,8 @@ stop_targets() {
     for d in $(descendants_of "$p"); do
       [[ -n "${protect[$d]:-}" ]] && continue
       [[ -n "${SELF_CHAIN[$d]:-}" ]] && continue
+      is_protected "${PROC_CMD[$d]:-}" && continue
+      is_blacklisted "${PROC_CMD[$d]:-}" && continue
       kill -KILL "$d" 2>/dev/null
     done
     if kill -KILL "$p" 2>/dev/null; then
@@ -1118,7 +1224,30 @@ head1 "── 종료 대상 프로세스 ──"
 
 # ── --idle-only: 추적 기반 후보로만 한정 ─────────────────────────────
 if (( IDLE_ONLY )); then
+  # 부팅 후 워밍업 — 유휴 관측이 idleMinutes 만큼 쌓이기 전에는 스윕하지 않는다.
+  # (재부팅 직후 방어 전용 — 잠자기 기상은 kern.boottime 이 안 바뀌므로
+  #  update_activity_state 의 관측 공백 보정이 담당한다)
+  now_ts=$(date +%s)
+  # sed 는 콤마 앵커 필수: greedy .* 가 "usec = " 안의 "sec = " 에 재매칭돼
+  # 마이크로초를 캡처하는 버그가 있었다 (가드 전체가 조용히 무력화됨)
+  boot_sec=$(sysctl -n kern.boottime 2>/dev/null | sed -E 's/.*\{ *sec = ([0-9]+),.*/\1/')
+  if [[ "$boot_sec" =~ '^[0-9]+$' ]] && (( now_ts - boot_sec < SET_IDLE_MIN * 60 )); then
+    uptime_min=$(( (now_ts - boot_sec) / 60 ))
+    info " [i] 부팅 후 ${uptime_min}분 — 워밍업(${SET_IDLE_MIN}분) 전이므로 idle 정리를 건너뜁니다."
+    run_log "targets: skipped boot-warmup uptimeMin=$uptime_min idleMinutes=$SET_IDLE_MIN"
+    run_log "=== run complete (boot-warmup skip) ==="
+    exit 0
+  fi
+  # 관측은 스윕을 건너뛰더라도 항상 갱신 — 트래커가 죽어있어도 90분마다
+  # 이 경로가 이력을 쌓아줘야 idle 판정이 성립한다
   update_activity_state
+  # 메모리 여유 게이트 — 가용 RAM 이 충분하면 죽일 이유가 없다.
+  if (( MEM_PCT_FREE >= SET_MIN_FREE_PCT )); then
+    info "$(printf ' [i] 가용 RAM %.1f%% ≥ 게이트 %s%% — idle 정리를 건너뜁니다.' $MEM_PCT_FREE $SET_MIN_FREE_PCT)"
+    run_log "$(printf 'targets: skipped memory-ok freePct=%.1f gatePct=%s' $MEM_PCT_FREE $SET_MIN_FREE_PCT)"
+    run_log "=== run complete (memory-ok skip) ==="
+    exit 0
+  fi
   get_reclaim_candidates
   typeset -A cand_set
   for p in $CAND_PIDS; do cand_set[$p]=1; done
@@ -1136,7 +1265,7 @@ fi
 
 run_log "targets: finalCount=${#TARGET_PIDS}"
 for p in $TARGET_PIDS; do
-  run_log "target: pid=$p ppid=${PROC_PPID[$p]} cat=$(categorize "${PROC_CMD[$p]}") rssKB=${PROC_RSS[$p]} cmd=${PROC_CMD[$p]}"
+  run_log "target: pid=$p ppid=${PROC_PPID[$p]} cat=$(categorize "${PROC_CMD[$p]}") idleMin=${CAND_IDLEMIN[$p]:--} rssKB=${PROC_RSS[$p]} cmd=${PROC_CMD[$p]}"
 done
 
 if (( ${#TARGET_PIDS} == 0 )); then
