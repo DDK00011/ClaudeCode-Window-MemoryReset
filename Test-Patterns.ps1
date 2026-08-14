@@ -1,6 +1,12 @@
 ﻿# 패턴 검증용 테스트 스크립트 (실제 종료 안 함)
 # MemoryReset.ps1 의 Get-TargetProcesses 함수만 추출해서 실행 — 안전성 검증 도구.
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$script:testFailures = 0
+function Write-TestFailure {
+    param([string]$Message)
+    $script:testFailures++
+    Write-Host "[FAIL] $Message" -ForegroundColor Red
+}
 
 # 같은 폴더의 MemoryReset.ps1 을 읽어서 함수 정의 추출
 $mainScript = Join-Path $PSScriptRoot 'MemoryReset.ps1'
@@ -52,7 +58,7 @@ $inTargets = $targets | Where-Object { $_.ExecutablePath -match '(?i)\\WindowsAp
 if (@($inTargets).Count -eq 0) {
     Write-Host "[PASS] Claude Desktop 안전하게 보존됨" -ForegroundColor Green
 } else {
-    Write-Host "[FAIL] Claude Desktop 이 종료 대상에 포함됨!" -ForegroundColor Red
+    Write-TestFailure "Claude Desktop 이 종료 대상에 포함됨!"
     $inTargets | Select-Object Name, ProcessId, ExecutablePath | Format-List
 }
 
@@ -67,7 +73,7 @@ if (@($guiInTargets).Count -eq 0 -and
     $funcDef -notmatch '(?i)\\Programs\\Antigravity\\|\\Google\\Antigravity\\|Antigravity\(\\.exe\)\?') {
     Write-Host "[PASS] Antigravity/VS Code 같은 GUI IDE 는 종료 대상에서 제외됨" -ForegroundColor Green
 } else {
-    Write-Host "[FAIL] GUI IDE 가 종료 대상에 포함되거나 Antigravity 앱 매칭이 남아 있음" -ForegroundColor Red
+    Write-TestFailure "GUI IDE 가 종료 대상에 포함되거나 Antigravity 앱 매칭이 남아 있음"
     $guiInTargets | Select-Object Name, ProcessId, ExecutablePath | Format-List
 }
 
@@ -96,47 +102,47 @@ $selfIncluded = $targets | Where-Object { $_.ProcessId -eq $PID }
 if ($null -eq $selfIncluded) {
     Write-Host "[PASS] 자기 자신 제외됨" -ForegroundColor Green
 } else {
-    Write-Host "[FAIL] 자기 자신이 대상에 포함됨!" -ForegroundColor Red
+    Write-TestFailure "자기 자신이 대상에 포함됨!"
 }
 
 Write-Host ""
-Write-Host "== Codex 세션 보존 검증 =="
+Write-Host "== 활성 세션 보존 검증 =="
 if ($src -match '(?ms)^function\s+Test-IsCodexProcess\b' -and $src -match '(?ms)^function\s+Get-CodexRootPids\b' -and $src.Contains('@openai[\\/]codex') -and $src -match 'node_repl') {
     Write-Host "[PASS] Codex CLI 식별/root helper 존재" -ForegroundColor Green
 } else {
-    Write-Host "[FAIL] Codex CLI 식별/root helper 누락" -ForegroundColor Red
+    Write-TestFailure "Codex CLI 식별/root helper 누락"
 }
-if ($src -match '(?ms)^function\s+Get-ActiveCodexProtectedPids\b' -and $src -match '진행 중인 Codex 세션 보존' -and $src -match '진행 중인 Codex 자손 보존') {
-    Write-Host "[PASS] 진행 중인 Codex 만 종료 방지하는 active guard 존재" -ForegroundColor Green
+if ($src -match '(?ms)^function\s+Get-ActiveProtectedPids\b' -and $src -match '진행 중인 세션 보존') {
+    Write-Host "[PASS] Claude/Codex 공통 active guard 존재" -ForegroundColor Green
 } else {
-    Write-Host "[FAIL] 진행 중인 Codex active guard 누락" -ForegroundColor Red
+    Write-TestFailure "Claude/Codex 공통 active guard 누락"
 }
-$codexChildGuard = $src.IndexOf('진행 중인 Codex 자손 보존 →')
+$activeGuard = $src.IndexOf('진행 중인 세션 보존 →')
 $closeMainWindow = $src.IndexOf('CloseMainWindow()')
-if ($codexChildGuard -ge 0 -and $closeMainWindow -ge 0 -and $codexChildGuard -lt $closeMainWindow) {
-    Write-Host "[PASS] active Codex 자손은 CloseMainWindow 전부터 보호" -ForegroundColor Green
+if ($activeGuard -ge 0 -and $closeMainWindow -ge 0 -and $activeGuard -lt $closeMainWindow) {
+    Write-Host "[PASS] active 세션 트리는 CloseMainWindow 전부터 보호" -ForegroundColor Green
 } else {
-    Write-Host "[FAIL] active Codex 자손 보호가 CloseMainWindow 이후에만 적용됨" -ForegroundColor Red
+    Write-TestFailure "active 세션 트리 보호가 CloseMainWindow 이후에만 적용됨"
 }
-if ($src -match '(?ms)잔존 프로세스 트리.*?\$allProcs\s*=\s*@\(Get-CimInstance Win32_Process.*?Get-ActiveCodexProtectedPids') {
-    Write-Host "[PASS] force kill 직전 active Codex 스냅샷 재계산" -ForegroundColor Green
+if ($src -match '(?ms)잔존 프로세스 트리.*?Update-ActivityState.*?Get-ActiveProtectedPids.*?\$treePids\s*=\s*@\(\[int\]\$p\.ProcessId\)\s*\+.*?taskkill\.exe') {
+    Write-Host "[PASS] force kill 직전 root+자손 active 스냅샷 재계산" -ForegroundColor Green
 } else {
-    Write-Host "[FAIL] force kill 직전 active Codex 스냅샷 재계산 누락" -ForegroundColor Red
+    Write-TestFailure "force kill 직전 root+자손 active 스냅샷 재계산 누락"
 }
-if ($src -match 'lastIoOps' -and $src -match 'lastIoBytes' -and $src -match 'Get-DescendantPids -RootPids @\(\$procId\)' -and $src -notmatch 'lastIoOps[^\r\n]*lastActiveAt' -and $src -notmatch 'lastIoBytes[^\r\n]*lastActiveAt') {
-    Write-Host "[PASS] Codex 트리 CPU 활동 추적 + I/O 진단 기록 존재" -ForegroundColor Green
+if ($src -match 'lastIoOps' -and $src -match 'lastIoBytes' -and $src -match '\$treePids\s*=\s*@\(\$procId\)\s*\+\s*@\(Get-DescendantPids' -and $src -notmatch '(?ms)\$treePids\s*=\s*if\s*\(Test-IsCodexProcess' -and $src -notmatch 'lastIoOps[^\r\n]*lastActiveAt' -and $src -notmatch 'lastIoBytes[^\r\n]*lastActiveAt') {
+    Write-Host "[PASS] Claude/Codex 트리 CPU 활동 추적 + I/O 진단 기록 존재" -ForegroundColor Green
 } else {
-    Write-Host "[FAIL] Codex 트리 CPU 추적 또는 I/O-only idle 보호 누락" -ForegroundColor Red
+    Write-TestFailure "Claude/Codex 트리 CPU 추적 또는 I/O-only idle 보호 누락"
 }
 if ($src -match "activityModel\s*=\s*'cpu-tree-v2'" -and $src -match '\$legacyEntry' -and $src -match '\$legacyRepaired' -and $src -match '\$cpuActive' -and $src -match 'lastActiveAt -eq \$entry\.lastSeenAt' -and $src -match 'lastCpuRatePct -lt \[double\]\$Settings\.cpuThresholdPct') {
     Write-Host "[PASS] legacy I/O-only lastActiveAt 보정 존재" -ForegroundColor Green
 } else {
-    Write-Host "[FAIL] legacy I/O-only lastActiveAt 보정 누락" -ForegroundColor Red
+    Write-TestFailure "legacy I/O-only lastActiveAt 보정 누락"
 }
 if ($src -match '\$legacySeen\s*=\s*ConvertTo-DateTimeSafe \$entry\.lastSeenAt' -and $src -notmatch '\$seen\s*=\s*ConvertTo-DateTimeSafe \$entry\.lastSeenAt') {
     Write-Host "[PASS] Update-ActivityState `$seen PID 해시테이블 덮어쓰기 없음" -ForegroundColor Green
 } else {
-    Write-Host "[FAIL] Update-ActivityState `$seen 변수 충돌 위험" -ForegroundColor Red
+    Write-TestFailure "Update-ActivityState `$seen 변수 충돌 위험"
 }
 $legacyIoStateCheck = & {
     foreach ($fnName in @('Test-IsCodexProcess','Get-DescendantPids','ConvertTo-HashtableDeep','ConvertTo-DateTimeSafe','Get-LogicalCoreCount','Read-ActivityState','Write-ActivityState','Update-ActivityState','Test-ProcessIdle','Get-ReclaimCandidates')) {
@@ -179,35 +185,140 @@ $legacyIoStateCheck = & {
 if ($legacyIoStateCheck) {
     Write-Host "[PASS] legacy I/O-only state 보정 동작 검증" -ForegroundColor Green
 } else {
-    Write-Host "[FAIL] legacy I/O-only state 보정 동작 실패" -ForegroundColor Red
+    Write-TestFailure "legacy I/O-only state 보정 동작 실패"
+}
+$claudeTreeActivityCheck = & {
+    foreach ($fnName in @('Test-IsCodexProcess','Get-DescendantPids','Get-CodexRootPids','Get-ActiveProtectedPids','ConvertTo-HashtableDeep','ConvertTo-DateTimeSafe','Get-LogicalCoreCount','Read-ActivityState','Write-ActivityState','Update-ActivityState','Test-ProcessIdle')) {
+        $fnAst = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $fnName }, $true)
+        Invoke-Expression $fnAst.Extent.Text
+    }
+    $tmp = Join-Path $env:TEMP "memoryreset-claude-tree-test-$PID.json"
+    $now = Get-Date
+    $created = $now.AddHours(-6).ToString('o')
+    $seenAt = $now.AddMinutes(-1).ToString('o')
+    $settings = [pscustomobject]@{ idleMinutes = 180; cpuThresholdPct = 0.1; trackIntervalMin = 30 }
+    $script:mockTreeTarget = [pscustomobject]@{ ProcessId = 4100; ParentProcessId = 1; Name = 'claude.exe'; CommandLine = 'claude'; ExecutablePath = 'C:\Users\M\.vscode\extensions\anthropic.claude-code-test\claude.exe'; CreationDate = $created; WorkingSetSize = 1048576 }
+    $script:mockTreeProcs = @(
+        [pscustomobject]@{ ProcessId = 4100; ParentProcessId = 1; Name = 'claude.exe'; CommandLine = 'claude'; ExecutablePath = $script:mockTreeTarget.ExecutablePath; CreationDate = $created; WorkingSetSize = 1048576; ReadOperationCount = 0; WriteOperationCount = 0; OtherOperationCount = 0; ReadTransferCount = 0; WriteTransferCount = 0; OtherTransferCount = 0 },
+        [pscustomobject]@{ ProcessId = 4101; ParentProcessId = 4100; Name = 'bash.exe'; CommandLine = 'bash test'; ExecutablePath = 'C:\Program Files\Git\bin\bash.exe'; CreationDate = $created; WorkingSetSize = 1048576; ReadOperationCount = 0; WriteOperationCount = 0; OtherOperationCount = 0; ReadTransferCount = 0; WriteTransferCount = 0; OtherTransferCount = 0 }
+    )
+    function Get-ActivityStatePath { $tmp }
+    function Get-TargetProcesses { @($script:mockTreeTarget) }
+    function Get-CimInstance {
+        param([Parameter(Position=0)][string]$ClassName, [string]$Filter)
+        if ($ClassName -eq 'Win32_ComputerSystem') { return [pscustomobject]@{ NumberOfLogicalProcessors = 4 } }
+        return $script:mockTreeProcs
+    }
+    function Get-Process { @([pscustomobject]@{ Id = 4100; CPU = 10.0 }, [pscustomobject]@{ Id = 4101; CPU = 4.0 }) }
+    try {
+        @{ version = 1; updatedAt = $seenAt; processes = @{ '4100' = @{ name = 'claude.exe'; creationDate = $created; firstTrackedAt = $now.AddHours(-5).ToString('o'); lastActiveAt = $now.AddHours(-4).ToString('o'); lastCpuSec = 10.0; lastCpuRatePct = 0.0; lastIoOps = 0; lastIoBytes = 0; lastSeenAt = $seenAt; wsBytes = 1048576; ppid = 1; activityModel = 'cpu-tree-v2' } } } |
+            ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $tmp -Encoding UTF8
+        $script:nLogicalCores = 4
+        $state = Update-ActivityState -Settings $settings
+        $entry = $state.processes['4100']
+        $protected = @(Get-ActiveProtectedPids -AllProcs $script:mockTreeProcs -State $state -Settings $settings -Now (Get-Date) -AdditionalRootPids @(4100))
+        $positiveDeltaOk = (($entry.lastCpuSec -eq 14.0) -and ([double]$entry.lastCpuRatePct -ge 0.1) -and ($protected -contains 4100) -and ($protected -contains 4101))
+
+        @{ version = 1; updatedAt = $seenAt; processes = @{ '4100' = @{ name = 'claude.exe'; creationDate = $created; firstTrackedAt = $now.AddHours(-5).ToString('o'); lastActiveAt = $now.AddHours(-4).ToString('o'); lastCpuSec = 100.0; lastCpuRatePct = 0.0; lastIoOps = 0; lastIoBytes = 0; lastSeenAt = $seenAt; wsBytes = 1048576; ppid = 1; activityModel = 'cpu-tree-v2' } } } |
+            ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $tmp -Encoding UTF8
+        $state = Update-ActivityState -Settings $settings
+        $entry = $state.processes['4100']
+        $protected = @(Get-ActiveProtectedPids -AllProcs $script:mockTreeProcs -State $state -Settings $settings -Now (Get-Date) -AdditionalRootPids @(4100))
+        $treeRegressionOk = (((Get-Date) - (ConvertTo-DateTimeSafe $entry.lastActiveAt)).TotalSeconds -lt 5 -and ($protected -contains 4100))
+        return ($positiveDeltaOk -and $treeRegressionOk)
+    } finally {
+        Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+        Remove-Variable -Name mockTreeTarget,mockTreeProcs -Scope Script -ErrorAction SilentlyContinue
+    }
+}
+if ($claudeTreeActivityCheck) {
+    Write-Host "[PASS] Claude 자손 CPU 증가/교체가 root+자손 보호로 연결됨" -ForegroundColor Green
+} else {
+    Write-TestFailure "Claude 자손 CPU 활동 보호 동작 실패"
+}
+$stopActiveRaceCheck = & {
+    foreach ($fnName in @('ConvertTo-DateTimeSafe','Stop-TargetProcesses')) {
+        $fnAst = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $fnName }, $true)
+        Invoke-Expression $fnAst.Extent.Text
+    }
+    $created = (Get-Date).AddHours(-6).ToString('o')
+    $script:mockStopRoot = [pscustomobject]@{ ProcessId = 4100; ParentProcessId = 1; Name = 'claude.exe'; CreationDate = $created; MainWindowHandle = [IntPtr]::Zero }
+    $script:mockStopChild = [pscustomobject]@{ ProcessId = 4101; ParentProcessId = 4100; Name = 'bash.exe'; CreationDate = $created }
+    $script:mockStopNewChild = [pscustomobject]@{ ProcessId = 4102; ParentProcessId = 4100; Name = 'wsl.exe'; CreationDate = $created }
+    function Write-RunLog {}
+    function Get-TrackerSettings { [pscustomobject]@{ idleMinutes = 180; cpuThresholdPct = 0.1 } }
+    function Update-ActivityState { @{ version = 1; processes = @{} } }
+    function Get-CimInstance {
+        param([Parameter(Position=0)][string]$ClassName, [string]$Filter)
+        $script:mockCimCall++
+        if ($script:mockTreeChange -and $script:mockCimCall -ge 3) { return @($script:mockStopRoot, $script:mockStopNewChild) }
+        return @($script:mockStopRoot, $script:mockStopChild)
+    }
+    function Get-DescendantPids { param([int[]]$RootPids, $AllProcs) @($AllProcs | Where-Object { $RootPids -contains [int]$_.ParentProcessId } | ForEach-Object { [int]$_.ProcessId }) }
+    function Get-ActiveProtectedPids {
+        $index = $script:mockGuardCall
+        $script:mockGuardCall++
+        if ($index -eq 0) { return $script:mockFirstProtected }
+        return $script:mockSecondProtected
+    }
+    function Get-Process { param([int]$Id, [string]$ErrorAction) if ($Id -eq 4100) { $script:mockStopRoot } }
+    function taskkill.exe { $script:mockTaskkillCalled = $true }
+    $cases = @(
+        [pscustomobject]@{ First = @(4100); Second = @(); Calls = 1; TreeChange = $false },
+        [pscustomobject]@{ First = @(4101); Second = @(); Calls = 1; TreeChange = $false },
+        [pscustomobject]@{ First = @(); Second = @(4100); Calls = 2; TreeChange = $false },
+        [pscustomobject]@{ First = @(); Second = @(4101); Calls = 2; TreeChange = $false },
+        [pscustomobject]@{ First = @(); Second = @(); Calls = 2; TreeChange = $true }
+    )
+    try {
+        foreach ($case in $cases) {
+            $script:mockFirstProtected = @($case.First)
+            $script:mockSecondProtected = @($case.Second)
+            $script:mockGuardCall = 0
+            $script:mockCimCall = 0
+            $script:mockTreeChange = $case.TreeChange
+            $script:mockTaskkillCalled = $false
+            Stop-TargetProcesses -Processes @($script:mockStopRoot) -TimeoutSec 0 -ProtectActive *> $null
+            if ($script:mockTaskkillCalled -or $script:mockGuardCall -ne $case.Calls) { return $false }
+        }
+        return $true
+    } finally {
+        Remove-Variable -Name mockStopRoot,mockStopChild,mockStopNewChild,mockFirstProtected,mockSecondProtected,mockGuardCall,mockCimCall,mockTreeChange,mockTaskkillCalled -Scope Script -ErrorAction SilentlyContinue
+    }
+}
+if ($stopActiveRaceCheck) {
+    Write-Host "[PASS] pre-close/force 직전 root·자손 활성화/트리 변경 시 taskkill 차단" -ForegroundColor Green
+} else {
+    Write-TestFailure "종료 직전 활성 세션 taskkill 차단 동작 실패"
 }
 if ($src -match 'Start-Sleep -Milliseconds 100' -and $src -match 'Move-Item -LiteralPath \$tmp -Destination \$path -Force') {
     Write-Host "[PASS] activity-state read retry + atomic replace 저장" -ForegroundColor Green
 } else {
-    Write-Host "[FAIL] activity-state 동시 읽기/쓰기 보호 누락" -ForegroundColor Red
+    Write-TestFailure "activity-state 동시 읽기/쓰기 보호 누락"
 }
 if (($src | Select-String -Pattern 'Update-ActivityState -Settings \$idleSettings' -AllMatches).Matches.Count -gt 0 -and
-    ($src | Select-String -Pattern 'Update-ActivityState -Settings \$codexSettings' -AllMatches).Matches.Count -gt 0) {
-    Write-Host "[PASS] 정리 직전 Codex 활동 스냅샷 갱신" -ForegroundColor Green
+    ($src | Select-String -Pattern 'Update-ActivityState -Settings \$activitySettings' -AllMatches).Matches.Count -ge 2 -and
+    $src -match 'Stop-TargetProcesses[^\r\n]*-ProtectActive:\$IdleOnly') {
+    Write-Host "[PASS] IdleOnly 선택/종료/force 직전 활동 스냅샷 갱신" -ForegroundColor Green
 } else {
-    Write-Host "[FAIL] 정리 직전 활동 스냅샷 갱신 누락" -ForegroundColor Red
+    Write-TestFailure "정리 직전 활동 스냅샷 갱신 누락"
 }
 if (($src | Select-String -Pattern '-not \(Test-IsCodexProcess \$_\)' -AllMatches).Matches.Count -gt 0 -and
     ($src | Select-String -Pattern '-not \(Test-IsCodexProcess \$t\)' -AllMatches).Matches.Count -gt 0) {
     Write-Host "[PASS] Codex 는 orphan 즉시 종료가 아니라 idle 판정만 사용" -ForegroundColor Green
 } else {
-    Write-Host "[FAIL] Codex orphan 즉시 종료 제외 가드 누락" -ForegroundColor Red
+    Write-TestFailure "Codex orphan 즉시 종료 제외 가드 누락"
 }
 if ($src -notmatch '(?ms)function\s+Get-CodexRootPids\b.*?return ,@\(\)' -and
-    $src -notmatch '(?ms)function\s+Get-ActiveCodexProtectedPids\b.*?return ,@\(\)') {
+    $src -notmatch '(?ms)function\s+Get-ActiveProtectedPids\b.*?return ,@\(\)') {
     Write-Host "[PASS] 빈 배열 반환 double-wrap 없음" -ForegroundColor Green
 } else {
-    Write-Host "[FAIL] Codex helper 안에 return ,@() 발견 — 빈 배열이 원소 1개로 보일 수 있음" -ForegroundColor Red
+    Write-TestFailure "active helper 안에 return ,@() 발견 — 빈 배열이 원소 1개로 보일 수 있음"
 }
 if ($src -notmatch '(?im)^\s*\$pid\s*=') {
     Write-Host "[PASS] PowerShell 자동 변수 `$PID 덮어쓰기 없음" -ForegroundColor Green
 } else {
-    Write-Host "[FAIL] `$pid 할당 발견 — PowerShell 자동 변수 `$PID 와 충돌" -ForegroundColor Red
+    Write-TestFailure "`$pid 할당 발견 — PowerShell 자동 변수 `$PID 와 충돌"
 }
 
 # v1.1 신규 기능 smoke test
@@ -220,7 +331,7 @@ foreach ($fn in $expectedFunctions) {
     if ($src -match "(?ms)^function\s+$fn\b") {
         Write-Host "[PASS] 함수 정의 존재: $fn" -ForegroundColor Green
     } else {
-        Write-Host "[FAIL] 함수 정의 누락: $fn" -ForegroundColor Red
+        Write-TestFailure "함수 정의 누락: $fn"
     }
 }
 
@@ -231,7 +342,7 @@ foreach ($p in $expectedParams) {
     if ($src -match $pattern) {
         Write-Host "[PASS] 파라미터 정의: -$p" -ForegroundColor Green
     } else {
-        Write-Host "[FAIL] 파라미터 누락: -$p" -ForegroundColor Red
+        Write-TestFailure "파라미터 누락: -$p"
     }
 }
 
@@ -276,14 +387,14 @@ Write-Host "== v1.2 트레이/CSV smoke test =="
 if ($src -match '(?ms)^function\s+Write-RecoveryLog\b') {
     Write-Host "[PASS] CSV 로깅 함수 정의: Write-RecoveryLog" -ForegroundColor Green
 } else {
-    Write-Host "[FAIL] Write-RecoveryLog 함수 누락" -ForegroundColor Red
+    Write-TestFailure "Write-RecoveryLog 함수 누락"
 }
 
 # 8-1. hidden scheduled task 실행 추적용 메인 로그
 if ($src -match '(?ms)^function\s+Write-RunLog\b' -and $src -match 'memoryreset\.log' -and $src -match 'target: pid=' -and $src -match 'taskkill-ok') {
     Write-Host "[PASS] 메인 실행 파일 로그 존재: memoryreset.log 대상/종료 결과 기록" -ForegroundColor Green
 } else {
-    Write-Host "[FAIL] 메인 실행 로그 누락 — scheduled cleanup 원인 추적 어려움" -ForegroundColor Red
+    Write-TestFailure "메인 실행 로그 누락 — scheduled cleanup 원인 추적 어려움"
 }
 
 # 9. CSV 락/재시도 가드
@@ -305,7 +416,7 @@ if (Test-Path $trayPath) {
     if ($addTypeIdx -gt 0 -and $mutexIdx -gt 0 -and $addTypeIdx -lt $mutexIdx) {
         Write-Host "[PASS] Tray Add-Type 이 mutex 검사 이전에 실행" -ForegroundColor Green
     } else {
-        Write-Host "[FAIL] Tray Add-Type 순서 오류 — 두번째 인스턴스 시 MessageBox 실패 가능" -ForegroundColor Red
+        Write-TestFailure "Tray Add-Type 순서 오류 — 두번째 인스턴스 시 MessageBox 실패 가능"
     }
 
     # 10-2. mutex Local\ scope (Global\ 권한 이슈 회피)
@@ -331,7 +442,7 @@ if (Test-Path $trayPath) {
         Write-Host "[WARN] Write-TrayLog 미확인 — silent failure 추적 어려움" -ForegroundColor Yellow
     }
 } else {
-    Write-Host "[FAIL] MemoryReset-Tray.ps1 파일 없음" -ForegroundColor Red
+    Write-TestFailure "MemoryReset-Tray.ps1 파일 없음"
 }
 
 # 11. .gitignore 개인 데이터 보호
@@ -386,7 +497,7 @@ foreach ($fn in $v14fn) {
     if ($src -match "(?ms)^function\s+$fn\b") {
         Write-Host "[PASS] 함수 정의: $fn" -ForegroundColor Green
     } else {
-        Write-Host "[FAIL] 함수 누락: $fn" -ForegroundColor Red
+        Write-TestFailure "함수 누락: $fn"
     }
 }
 
@@ -395,7 +506,7 @@ foreach ($p in @('TrackActivity','IdleOnly')) {
     if ($src -match ('\[switch\]\$' + $p + '\b')) {
         Write-Host "[PASS] 파라미터: -$p" -ForegroundColor Green
     } else {
-        Write-Host "[FAIL] 파라미터 누락: -$p" -ForegroundColor Red
+        Write-TestFailure "파라미터 누락: -$p"
     }
 }
 
@@ -403,12 +514,12 @@ foreach ($p in @('TrackActivity','IdleOnly')) {
 if ($src -match '-not\s+\(Test-IsAdmin\)\s+-and\s+-not\s+\$TrackActivity') {
     Write-Host "[PASS] -TrackActivity UAC 승격 제외 (무인 실행 안전)" -ForegroundColor Green
 } else {
-    Write-Host "[FAIL] -TrackActivity 가 UAC 승격 트리거 — 스케줄러 5분마다 팝업 위험" -ForegroundColor Red
+    Write-TestFailure "-TrackActivity 가 UAC 승격 트리거 — 스케줄러 5분마다 팝업 위험"
 }
 
 # 18. [보안] 텔레그램 봇 토큰 하드코딩 금지 — 설정 파일에서만 로드되어야 함
 if ($src -match '\d{8,}:[A-Za-z0-9_-]{30,}') {
-    Write-Host "[FAIL] 소스에 봇 토큰 형태 문자열 발견 — 시크릿 하드코딩 위험!" -ForegroundColor Red
+    Write-TestFailure "소스에 봇 토큰 형태 문자열 발견 — 시크릿 하드코딩 위험!"
 } else {
     Write-Host "[PASS] 소스에 하드코딩된 봇 토큰 없음 (tracker-settings.json 에서만 로드)" -ForegroundColor Green
 }
@@ -434,7 +545,7 @@ if (Test-Path $giPath) {
     if ($giFix -match '(?m)^tracker-settings\.json\s*$') {
         Write-Host "[PASS] .gitignore tracker-settings.json 정확 보호 (인라인 주석 없음)" -ForegroundColor Green
     } else {
-        Write-Host "[FAIL] tracker-settings.json 토큰 파일 미보호 — 커밋 위험!" -ForegroundColor Red
+        Write-TestFailure "tracker-settings.json 토큰 파일 미보호 — 커밋 위험!"
     }
 }
 
@@ -450,7 +561,7 @@ foreach ($script in @('Track-Schedule.ps1','Cleanup-Schedule.ps1','Run-Hidden.vb
     if (Test-Path (Join-Path $PSScriptRoot $script)) {
         Write-Host "[PASS] 스크립트 존재: $script" -ForegroundColor Green
     } else {
-        Write-Host "[FAIL] 스크립트 누락: $script" -ForegroundColor Red
+        Write-TestFailure "스크립트 누락: $script"
     }
 }
 
@@ -463,14 +574,14 @@ if ($trackSrc -match "New-ScheduledTaskAction -Execute 'wscript\.exe'" -and
     $cleanupSrc -match 'Run-Hidden\.vbs') {
     Write-Host "[PASS] 스케줄러 등록 wscript 숨김 래퍼 사용" -ForegroundColor Green
 } else {
-    Write-Host "[FAIL] 스케줄러 등록이 powershell.exe 직접 실행으로 되돌아갈 위험" -ForegroundColor Red
+    Write-TestFailure "스케줄러 등록이 powershell.exe 직접 실행으로 되돌아갈 위험"
 }
 
 # 25. 자동 정리 주기/텔레그램 안내 문구 동기화
 if ($cleanupSrc -match '\[int\]\$IntervalHours\s*=\s*3' -and $src -match 'ClaudeCodeMemoryCleanup.+3시간마다') {
     Write-Host "[PASS] 자동 정리 기본 3시간 + 텔레그램 안내 동기화" -ForegroundColor Green
 } else {
-    Write-Host "[FAIL] 자동 정리 주기와 텔레그램 안내 문구 불일치" -ForegroundColor Red
+    Write-TestFailure "자동 정리 주기와 텔레그램 안내 문구 불일치"
 }
 
 # ════════════════════════════════════════════════════════════════════
@@ -481,11 +592,11 @@ Write-Host "== v1.4.1 부산물(자손 트리) 정리 smoke test =="
 
 if ($src -match '(?ms)^function\s+Get-DescendantPids\b') {
     Write-Host "[PASS] 함수 정의: Get-DescendantPids" -ForegroundColor Green
-} else { Write-Host "[FAIL] Get-DescendantPids 누락" -ForegroundColor Red }
+} else { Write-TestFailure "Get-DescendantPids 누락" }
 
 if ($src -match '\[switch\]\$IncludeDescendants\b') {
     Write-Host "[PASS] 파라미터: -IncludeDescendants" -ForegroundColor Green
-} else { Write-Host "[FAIL] -IncludeDescendants 누락" -ForegroundColor Red }
+} else { Write-TestFailure "-IncludeDescendants 누락" }
 
 # Get-DescendantPids 는 flat array 반환이어야 함 (,@() 이중 wrap 금지 — desc 가 단일 int[] 원소가 되는 버그)
 if ($src -match 'return \$result\.ToArray\(\)' -and $src -notmatch 'return ,\$result\.ToArray\(\)') {
@@ -499,4 +610,9 @@ if ($src -match '-ne \$self' -and $src -match 'ExcludePids -notcontains') {
 
 if (Test-Path (Join-Path $PSScriptRoot 'Run-PurgeAll.bat')) {
     Write-Host "[PASS] Run-PurgeAll.bat (원클릭 전체 청소) 존재" -ForegroundColor Green
-} else { Write-Host "[FAIL] Run-PurgeAll.bat 누락" -ForegroundColor Red }
+} else { Write-TestFailure "Run-PurgeAll.bat 누락" }
+
+if ($script:testFailures -gt 0) {
+    Write-Host ("`n{0} test(s) failed." -f $script:testFailures) -ForegroundColor Red
+    exit 1
+}

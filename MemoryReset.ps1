@@ -459,12 +459,19 @@ function Get-CodexRootPids {
     return @($roots.Keys | ForEach-Object { [int]$_ })
 }
 
-function Get-ActiveCodexProtectedPids {
-    param($AllProcs, $State, $Settings, $Now)
+function Get-ActiveProtectedPids {
+    param($AllProcs, $State, $Settings, $Now, [int[]]$AdditionalRootPids = @())
+    $rootPids = @(Get-CodexRootPids -AllProcs $AllProcs) + @($AdditionalRootPids)
+    $byPid = @{}
+    foreach ($p in $AllProcs) { $byPid[[int]$p.ProcessId] = $p }
     $activeRoots = @()
-    foreach ($rootPid in @(Get-CodexRootPids -AllProcs $AllProcs)) {
+    foreach ($rootPid in @($rootPids | Sort-Object -Unique)) {
         $entry = if ($State -and $State.processes) { $State.processes["$rootPid"] } else { $null }
-        if (-not (Test-ProcessIdle -Entry $entry -Settings $Settings -Now $Now)) {
+        $current = $byPid[[int]$rootPid]
+        $entryCreated = if ($entry) { ConvertTo-DateTimeSafe $entry.creationDate } else { $null }
+        $currentCreated = if ($current) { ConvertTo-DateTimeSafe $current.CreationDate } else { $null }
+        if (-not $entryCreated -or -not $currentCreated -or $entryCreated -ne $currentCreated -or
+            -not (Test-ProcessIdle -Entry $entry -Settings $Settings -Now $Now)) {
             $activeRoots += [int]$rootPid
         }
     }
@@ -599,7 +606,8 @@ function Stop-TargetProcesses {
     param(
         [array]$Processes,
         [int]$TimeoutSec = 8,
-        [switch]$DryRun
+        [switch]$DryRun,
+        [switch]$ProtectActive
     )
 
     if ($Processes.Count -eq 0) {
@@ -609,32 +617,27 @@ function Stop-TargetProcesses {
     }
 
     Write-RunLog ("stop: start targets={0} dryRun={1} timeoutSec={2}" -f $Processes.Count, [bool]$DryRun, $TimeoutSec)
+    $activitySettings = Get-TrackerSettings
+    $activityState = Update-ActivityState -Settings $activitySettings
     $allProcs = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
-    $codexSettings = Get-TrackerSettings
-    $codexState = Update-ActivityState -Settings $codexSettings
-    $activeCodexPids = @(Get-ActiveCodexProtectedPids -AllProcs $allProcs -State $codexState -Settings $codexSettings -Now (Get-Date))
-    Write-RunLog ("stop: activeCodexProtected={0}" -f $activeCodexPids.Count)
-    if ($activeCodexPids.Count -gt 0) {
+    $additionalRootPids = if ($ProtectActive) { @($Processes | ForEach-Object { [int]$_.ProcessId }) } else { @() }
+    $activeProtectedPids = @(Get-ActiveProtectedPids -AllProcs $allProcs -State $activityState -Settings $activitySettings -Now (Get-Date) -AdditionalRootPids $additionalRootPids)
+    Write-RunLog ("stop: activeProtected={0} protectActive={1}" -f $activeProtectedPids.Count, [bool]$ProtectActive)
+    if ($activeProtectedPids.Count -gt 0) {
         $Processes = @($Processes | Where-Object {
             $procId = [int]$_.ProcessId
-            if ($activeCodexPids -contains $procId) {
-                Write-Host " [SKIP] 진행 중인 Codex 세션 보존 → $($_.Name) (PID=$($_.ProcessId))" -ForegroundColor Green
-                Write-RunLog ("skip: active-codex pid={0} name={1}" -f $_.ProcessId, $_.Name)
-                return $false
-            }
-            $descPids = @(Get-DescendantPids -RootPids @($procId) -AllProcs $allProcs)
-            $hasCodexChild = @($descPids | Where-Object { $activeCodexPids -contains [int]$_ }).Count -gt 0
-            if ($hasCodexChild) {
-                Write-Host " [SKIP] 진행 중인 Codex 자손 보존 → $($_.Name) (PID=$($_.ProcessId))" -ForegroundColor Green
-                Write-RunLog ("skip: active-codex-descendant pid={0} name={1}" -f $_.ProcessId, $_.Name)
+            $treePids = @($procId) + @(Get-DescendantPids -RootPids @($procId) -AllProcs $allProcs)
+            if (@($treePids | Where-Object { $activeProtectedPids -contains [int]$_ }).Count -gt 0) {
+                Write-Host " [SKIP] 진행 중인 세션 보존 → $($_.Name) (PID=$($_.ProcessId))" -ForegroundColor Green
+                Write-RunLog ("skip: active-session pid={0} name={1}" -f $_.ProcessId, $_.Name)
                 return $false
             }
             return $true
         })
-        Write-RunLog ("stop: targetsAfterCodexGuard={0}" -f $Processes.Count)
+        Write-RunLog ("stop: targetsAfterActiveGuard={0}" -f $Processes.Count)
         if ($Processes.Count -eq 0) {
-            Write-Host "[i] Codex 보존 후 종료할 대상 프로세스가 없습니다." -ForegroundColor DarkGray
-            Write-RunLog "stop: all targets skipped by Codex guard"
+            Write-Host "[i] 활성 세션 보존 후 종료할 대상 프로세스가 없습니다." -ForegroundColor DarkGray
+            Write-RunLog "stop: all targets skipped by active guard"
             return
         }
     }
@@ -698,21 +701,33 @@ function Stop-TargetProcesses {
         return
     }
 
+    $activityState = Update-ActivityState -Settings $activitySettings
     $allProcs = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
-    $codexState = Update-ActivityState -Settings $codexSettings
-    $activeCodexPids = @(Get-ActiveCodexProtectedPids -AllProcs $allProcs -State $codexState -Settings $codexSettings -Now (Get-Date))
+    $additionalRootPids = if ($ProtectActive) { @($survivors | ForEach-Object { [int]$_.ProcessId }) } else { @() }
+    $activeProtectedPids = @(Get-ActiveProtectedPids -AllProcs $allProcs -State $activityState -Settings $activitySettings -Now (Get-Date) -AdditionalRootPids $additionalRootPids)
 
     foreach ($p in $survivors) {
         $tag = "$($p.Name) (PID=$($p.ProcessId))"
-        $descPids = @(Get-DescendantPids -RootPids @([int]$p.ProcessId) -AllProcs $allProcs)
-        $hasCodexChild = @($descPids | Where-Object { $activeCodexPids -contains [int]$_ }).Count -gt 0
-        if ($hasCodexChild) {
-            Write-Host " [SKIP] $tag (진행 중인 Codex 자손 보존)" -ForegroundColor Green
-            Write-RunLog ("skip-force: active-codex-descendant pid={0} name={1}" -f $p.ProcessId, $p.Name)
+        $treePids = @([int]$p.ProcessId) + @(Get-DescendantPids -RootPids @([int]$p.ProcessId) -AllProcs $allProcs)
+        if (@($treePids | Where-Object { $activeProtectedPids -contains [int]$_ }).Count -gt 0) {
+            Write-Host " [SKIP] $tag (진행 중인 세션 보존)" -ForegroundColor Green
+            Write-RunLog ("skip-force: active-session pid={0} name={1}" -f $p.ProcessId, $p.Name)
             continue
-        } else {
-            $null = & taskkill.exe /F /T /PID $p.ProcessId 2>&1
         }
+        if ($ProtectActive) {
+            $freshAllProcs = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
+            $freshRoot = @($freshAllProcs | Where-Object { [int]$_.ProcessId -eq [int]$p.ProcessId }) | Select-Object -First 1
+            $selectedCreated = ConvertTo-DateTimeSafe $p.CreationDate
+            $freshCreated = if ($freshRoot) { ConvertTo-DateTimeSafe $freshRoot.CreationDate } else { $null }
+            $freshTreePids = @([int]$p.ProcessId) + @(Get-DescendantPids -RootPids @([int]$p.ProcessId) -AllProcs $freshAllProcs)
+            $treeChanged = @(Compare-Object @($treePids | Sort-Object) @($freshTreePids | Sort-Object)).Count -gt 0
+            if (-not $selectedCreated -or -not $freshCreated -or $selectedCreated -ne $freshCreated -or $treeChanged) {
+                Write-Host " [SKIP] $tag (종료 직전 프로세스 트리 변경)" -ForegroundColor Green
+                Write-RunLog ("skip-force: changed-process-tree pid={0} name={1}" -f $p.ProcessId, $p.Name)
+                continue
+            }
+        }
+        $null = & taskkill.exe /F /T /PID $p.ProcessId 2>&1
         # 0=success, 128=process already gone (cascaded by parent kill) → both OK
         if ($LASTEXITCODE -eq 0) {
             Write-Host " [KILL] $tag" -ForegroundColor Yellow
@@ -1374,11 +1389,7 @@ function Update-ActivityState {
     foreach ($t in $targets) {
         $procId = [int]$t.ProcessId
         $seen["$procId"] = $true
-        $treePids = if (Test-IsCodexProcess $t) {
-            @($procId) + @(Get-DescendantPids -RootPids @($procId) -AllProcs $allProcs)
-        } else {
-            @($procId)
-        }
+        $treePids = @($procId) + @(Get-DescendantPids -RootPids @($procId) -AllProcs $allProcs)
         $cpuSec = $null
         $ioOps = [UInt64]0
         $ioBytes = [UInt64]0
@@ -1416,7 +1427,12 @@ function Update-ActivityState {
                 $dSec = if ($lastSeen) { ($now - $lastSeen).TotalSeconds } else { 0 }
                 if ($dSec -gt 0) {
                     $dCpu = $cpuSec - [double]$entry.lastCpuSec
-                    if ($dCpu -lt 0) { $dCpu = 0 }
+                    if ($dCpu -lt 0) {
+                        # 자손 종료/교체로 합계가 감소한 것 자체가 트리 활동이므로 fail-closed 보존.
+                        $dCpu = 0
+                        $entry.lastActiveAt = $nowIso
+                        $cpuActive = $true
+                    }
                     $ratePct = ($dCpu / $dSec / $nCores) * 100
                     $entry.lastCpuRatePct = [math]::Round($ratePct, 3)
                     if ($ratePct -ge [double]$Settings.cpuThresholdPct) {
@@ -1466,7 +1482,7 @@ function Update-ActivityState {
 
 function Test-ProcessIdle {
     # 안전 판정: (1)추적 시작 후 idleMinutes 경과(관측충분) AND (2)마지막 활동 후 idleMinutes 경과
-    #            AND (3)직전 간격 CPU 율 < 임계. Codex 는 트리 전체 CPU 로 lastActiveAt 을 갱신한다.
+    #            AND (3)직전 간격 CPU 율 < 임계. Claude/Codex 모두 트리 전체 CPU 로 lastActiveAt 을 갱신한다.
     #            하나라도 불충족 → 보존(false). 활성 세션 오탐 방지.
     param($Entry, $Settings, $Now)
     if (-not $Entry) { return $false }
@@ -1780,7 +1796,7 @@ if (-not $SkipConfirmation -and -not $DryRun -and $targets.Count -gt 0) {
     }
 }
 
-Stop-TargetProcesses -Processes $targets -TimeoutSec $GracefulTimeoutSec -DryRun:$DryRun
+Stop-TargetProcesses -Processes $targets -TimeoutSec $GracefulTimeoutSec -DryRun:$DryRun -ProtectActive:$IdleOnly
 Invoke-MemoryRecovery -DryRun:$DryRun
 
 # v1.1: 옵션 단계

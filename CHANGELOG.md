@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Antigravity GUI processes are no longer cleanup targets. MemoryReset now targets only Claude/Codex CLI work processes and their descendants, while GUI IDE hosts such as Antigravity and VS Code remain out of scope.
 - Codex cleanup is now activity-based instead of blanket-blocked. Codex CLI roots are cleanup targets again, but active/unknown Codex process trees are skipped before `CloseMainWindow` or `taskkill /T`; only sessions proven idle by tracking history are reclaim candidates.
 - Codex activity tracking now aggregates CPU across the Codex process tree, so work happening in child `node_repl.exe`, `pwsh.exe`, `cmd.exe`, or tool processes refreshes `lastActiveAt`.
+- Claude activity tracking now also aggregates the full process tree, so Bash/WSL/tool work is not mistaken for an idle CLI root.
+- `-IdleOnly` now revalidates every selected Claude/Codex root and its descendants before graceful close and again immediately before `taskkill /T`; sessions that became active after selection are preserved.
+- Child-process churn that makes the aggregate CPU counter decrease is treated as activity, and the force-kill step fails closed if the root identity or process-tree membership changes after revalidation.
+- `Test-Patterns.ps1` now executes root/descendant activation race checks and returns a non-zero exit code when any assertion fails.
 - I/O counters are kept as diagnostics only and no longer refresh `lastActiveAt`; sleep/resume or background IPC can no longer make completed idle Codex sessions immortal. Legacy I/O-refreshed state is corrected once when CPU was below threshold.
 - Idle cleanup refreshes activity state immediately before candidate selection and before termination, avoiding stale idle history killing a newly active Codex session.
 - Active Codex descendants are filtered before `CloseMainWindow`, not only before force `taskkill`, and the force-kill stage refreshes its process snapshot again.
