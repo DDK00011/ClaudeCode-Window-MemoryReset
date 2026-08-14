@@ -180,7 +180,7 @@ Open from the system tray menu → "View recovery history" in Excel/Notepad. You
 
 **Problem**: `-OrphansOnly` catches only orphan processes whose parent IDE has died, but on Windows it is more common for **idle `claude.exe` processes to accumulate while the IDE extension host remains alive** (children do not cascade-terminate even after closing the window/tab). v1.4 safely recovers them based on **"unused time"**.
 
-**Key safety principle**: even active claude sessions have CPU 0% while waiting for input. So killing based only on "CPU is low now" kills active sessions. v1.4 **accumulates activity history over time**, cleaning up only those with **continuous inactivity** of `idleMinutes` — active sessions are preserved because they must use CPU during that period.
+**Key safety principle**: Even active claude sessions have 0% CPU while waiting for input. Therefore, killing based only on "current CPU is low" kills active sessions. v1.4 **accumulates activity history over time** for the CLI itself and descendants like Bash/WSL, then checks again immediately before termination to clean up only sessions with `idleMinutes` of **continuous inactivity**.
 
 **1) Register background tracking** (default 5-minute interval, records CPU snapshots only — never terminates):
 

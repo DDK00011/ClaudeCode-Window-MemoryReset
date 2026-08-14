@@ -1,6 +1,12 @@
 ﻿# Test script for pattern verification (does not actually terminate)
 # Read MemoryReset.ps1 and extract and run only the Get-TargetProcesses function — safety verification tool.
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$script:testFailures = 0
+function Write-TestFailure {
+    param([string]$Message)
+    $script:testFailures++
+    Write-Host "[FAIL] $Message" -ForegroundColor Red
+}
 
 # Read MemoryReset.ps1 in the same folder and extract the function definition
 $mainScript = Join-Path $PSScriptRoot 'MemoryReset.ps1'
@@ -52,7 +58,7 @@ $inTargets = $targets | Where-Object { $_.ExecutablePath -match '(?i)\\WindowsAp
 if (@($inTargets).Count -eq 0) {
     Write-Host "[PASS] Claude Desktop safely preserved" -ForegroundColor Green
 } else {
-    Write-Host "[FAIL] Claude Desktop is included in termination targets!" -ForegroundColor Red
+    Write-TestFailure "Claude Desktop included in termination targets!"
     $inTargets | Select-Object Name, ProcessId, ExecutablePath | Format-List
 }
 
@@ -67,7 +73,7 @@ if (@($guiInTargets).Count -eq 0 -and
     $funcDef -notmatch '(?i)\\Programs\\Antigravity\\|\\Google\\Antigravity\\|Antigravity\(\\.exe\)\?') {
     Write-Host "[PASS] Antigravity/VS Code GUI IDEs are excluded from termination targets" -ForegroundColor Green
 } else {
-    Write-Host "[FAIL] GUI IDE is included in termination targets or Antigravity app match remains" -ForegroundColor Red
+    Write-TestFailure "GUI IDE included in termination targets or Antigravity app matching remains"
     $guiInTargets | Select-Object Name, ProcessId, ExecutablePath | Format-List
 }
 
@@ -96,47 +102,47 @@ $selfIncluded = $targets | Where-Object { $_.ProcessId -eq $PID }
 if ($null -eq $selfIncluded) {
     Write-Host "[PASS] Self excluded" -ForegroundColor Green
 } else {
-    Write-Host "[FAIL] Self is included in targets!" -ForegroundColor Red
+    Write-TestFailure "Self included in targets!"
 }
 
 Write-Host ""
-Write-Host "== Codex session preservation verification =="
+Write-Host "== Active session preservation verification =="
 if ($src -match '(?ms)^function\s+Test-IsCodexProcess\b' -and $src -match '(?ms)^function\s+Get-CodexRootPids\b' -and $src.Contains('@openai[\\/]codex') -and $src -match 'node_repl') {
     Write-Host "[PASS] Codex CLI identification/root helper present" -ForegroundColor Green
 } else {
-    Write-Host "[FAIL] Codex CLI identification/root helper missing" -ForegroundColor Red
+    Write-TestFailure "Codex CLI identification/root helper missing"
 }
-if ($src -match '(?ms)^function\s+Get-ActiveCodexProtectedPids\b' -and $src -match 'Preserve active Codex session' -and $src -match 'Preserve active Codex descendant') {
-    Write-Host "[PASS] active guard exists that prevents termination of only active Codex" -ForegroundColor Green
+if ($src -match '(?ms)^function\s+Get-ActiveProtectedPids\b' -and $src -match 'active session preserved') {
+    Write-Host "[PASS] Claude/Codex shared active guard present" -ForegroundColor Green
 } else {
-    Write-Host "[FAIL] active Codex active guard missing" -ForegroundColor Red
+    Write-TestFailure "Claude/Codex shared active guard missing"
 }
-$codexChildGuard = $src.IndexOf('Preserve active Codex descendant →')
+$activeGuard = $src.IndexOf('active session preserved →')
 $closeMainWindow = $src.IndexOf('CloseMainWindow()')
-if ($codexChildGuard -ge 0 -and $closeMainWindow -ge 0 -and $codexChildGuard -lt $closeMainWindow) {
-    Write-Host "[PASS] active Codex descendant protected before CloseMainWindow" -ForegroundColor Green
+if ($activeGuard -ge 0 -and $closeMainWindow -ge 0 -and $activeGuard -lt $closeMainWindow) {
+    Write-Host "[PASS] active session tree protected before CloseMainWindow" -ForegroundColor Green
 } else {
-    Write-Host "[FAIL] active Codex descendant protection applies only after CloseMainWindow" -ForegroundColor Red
+    Write-TestFailure "active session tree protection applies only after CloseMainWindow"
 }
-if ($src -match '(?ms)remaining process tree.*?\$allProcs\s*=\s*@\(Get-CimInstance Win32_Process.*?Get-ActiveCodexProtectedPids') {
-    Write-Host "[PASS] Immediately before force kill active Codex snapshot is recalculated" -ForegroundColor Green
+if ($src -match '(?ms)remaining process tree.*?Update-ActivityState.*?Get-ActiveProtectedPids.*?\$treePids\s*=\s*@\(\[int\]\$p\.ProcessId\)\s*\+.*?taskkill\.exe') {
+    Write-Host "[PASS] force kill immediately before root+descendant active snapshot recalculation" -ForegroundColor Green
 } else {
-    Write-Host "[FAIL] Missing active Codex snapshot recalculation immediately before force kill" -ForegroundColor Red
+    Write-TestFailure "root+descendant active snapshot recalculation missing immediately before force kill"
 }
-if ($src -match 'lastIoOps' -and $src -match 'lastIoBytes' -and $src -match 'Get-DescendantPids -RootPids @\(\$procId\)' -and $src -notmatch 'lastIoOps[^\r\n]*lastActiveAt' -and $src -notmatch 'lastIoBytes[^\r\n]*lastActiveAt') {
-    Write-Host "[PASS] Codex tree CPU activity tracking + I/O diagnostic records exist" -ForegroundColor Green
+if ($src -match 'lastIoOps' -and $src -match 'lastIoBytes' -and $src -match '\$treePids\s*=\s*@\(\$procId\)\s*\+\s*@\(Get-DescendantPids' -and $src -notmatch '(?ms)\$treePids\s*=\s*if\s*\(Test-IsCodexProcess' -and $src -notmatch 'lastIoOps[^\r\n]*lastActiveAt' -and $src -notmatch 'lastIoBytes[^\r\n]*lastActiveAt') {
+    Write-Host "[PASS] Claude/Codex tree CPU activity tracking + I/O diagnostic records present" -ForegroundColor Green
 } else {
-    Write-Host "[FAIL] Missing Codex tree CPU tracking or I/O-only idle protection" -ForegroundColor Red
+    Write-TestFailure "Claude/Codex tree CPU tracking or I/O-only idle protection missing"
 }
 if ($src -match "activityModel\s*=\s*'cpu-tree-v2'" -and $src -match '\$legacyEntry' -and $src -match '\$legacyRepaired' -and $src -match '\$cpuActive' -and $src -match 'lastActiveAt -eq \$entry\.lastSeenAt' -and $src -match 'lastCpuRatePct -lt \[double\]\$Settings\.cpuThresholdPct') {
     Write-Host "[PASS] legacy I/O-only lastActiveAt correction present" -ForegroundColor Green
 } else {
-    Write-Host "[FAIL] legacy I/O-only lastActiveAt correction missing" -ForegroundColor Red
+    Write-TestFailure "legacy I/O-only lastActiveAt correction missing"
 }
 if ($src -match '\$legacySeen\s*=\s*ConvertTo-DateTimeSafe \$entry\.lastSeenAt' -and $src -notmatch '\$seen\s*=\s*ConvertTo-DateTimeSafe \$entry\.lastSeenAt') {
     Write-Host "[PASS] Update-ActivityState `$seen PID hash table not overwritten" -ForegroundColor Green
 } else {
-    Write-Host "[FAIL] Update-ActivityState `$seen variable collision risk" -ForegroundColor Red
+    Write-TestFailure "Update-ActivityState `$seen variable collision risk"
 }
 $legacyIoStateCheck = & {
     foreach ($fnName in @('Test-IsCodexProcess','Get-DescendantPids','ConvertTo-HashtableDeep','ConvertTo-DateTimeSafe','Get-LogicalCoreCount','Read-ActivityState','Write-ActivityState','Update-ActivityState','Test-ProcessIdle','Get-ReclaimCandidates')) {
@@ -179,35 +185,140 @@ $legacyIoStateCheck = & {
 if ($legacyIoStateCheck) {
     Write-Host "[PASS] legacy I/O-only state correction behavior verified" -ForegroundColor Green
 } else {
-    Write-Host "[FAIL] legacy I/O-only state correction failed" -ForegroundColor Red
+    Write-TestFailure "legacy I/O-only state correction behavior failed"
+}
+$claudeTreeActivityCheck = & {
+    foreach ($fnName in @('Test-IsCodexProcess','Get-DescendantPids','Get-CodexRootPids','Get-ActiveProtectedPids','ConvertTo-HashtableDeep','ConvertTo-DateTimeSafe','Get-LogicalCoreCount','Read-ActivityState','Write-ActivityState','Update-ActivityState','Test-ProcessIdle')) {
+        $fnAst = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $fnName }, $true)
+        Invoke-Expression $fnAst.Extent.Text
+    }
+    $tmp = Join-Path $env:TEMP "memoryreset-claude-tree-test-$PID.json"
+    $now = Get-Date
+    $created = $now.AddHours(-6).ToString('o')
+    $seenAt = $now.AddMinutes(-1).ToString('o')
+    $settings = [pscustomobject]@{ idleMinutes = 180; cpuThresholdPct = 0.1; trackIntervalMin = 30 }
+    $script:mockTreeTarget = [pscustomobject]@{ ProcessId = 4100; ParentProcessId = 1; Name = 'claude.exe'; CommandLine = 'claude'; ExecutablePath = 'C:\Users\M\.vscode\extensions\anthropic.claude-code-test\claude.exe'; CreationDate = $created; WorkingSetSize = 1048576 }
+    $script:mockTreeProcs = @(
+        [pscustomobject]@{ ProcessId = 4100; ParentProcessId = 1; Name = 'claude.exe'; CommandLine = 'claude'; ExecutablePath = $script:mockTreeTarget.ExecutablePath; CreationDate = $created; WorkingSetSize = 1048576; ReadOperationCount = 0; WriteOperationCount = 0; OtherOperationCount = 0; ReadTransferCount = 0; WriteTransferCount = 0; OtherTransferCount = 0 },
+        [pscustomobject]@{ ProcessId = 4101; ParentProcessId = 4100; Name = 'bash.exe'; CommandLine = 'bash test'; ExecutablePath = 'C:\Program Files\Git\bin\bash.exe'; CreationDate = $created; WorkingSetSize = 1048576; ReadOperationCount = 0; WriteOperationCount = 0; OtherOperationCount = 0; ReadTransferCount = 0; WriteTransferCount = 0; OtherTransferCount = 0 }
+    )
+    function Get-ActivityStatePath { $tmp }
+    function Get-TargetProcesses { @($script:mockTreeTarget) }
+    function Get-CimInstance {
+        param([Parameter(Position=0)][string]$ClassName, [string]$Filter)
+        if ($ClassName -eq 'Win32_ComputerSystem') { return [pscustomobject]@{ NumberOfLogicalProcessors = 4 } }
+        return $script:mockTreeProcs
+    }
+    function Get-Process { @([pscustomobject]@{ Id = 4100; CPU = 10.0 }, [pscustomobject]@{ Id = 4101; CPU = 4.0 }) }
+    try {
+        @{ version = 1; updatedAt = $seenAt; processes = @{ '4100' = @{ name = 'claude.exe'; creationDate = $created; firstTrackedAt = $now.AddHours(-5).ToString('o'); lastActiveAt = $now.AddHours(-4).ToString('o'); lastCpuSec = 10.0; lastCpuRatePct = 0.0; lastIoOps = 0; lastIoBytes = 0; lastSeenAt = $seenAt; wsBytes = 1048576; ppid = 1; activityModel = 'cpu-tree-v2' } } } |
+            ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $tmp -Encoding UTF8
+        $script:nLogicalCores = 4
+        $state = Update-ActivityState -Settings $settings
+        $entry = $state.processes['4100']
+        $protected = @(Get-ActiveProtectedPids -AllProcs $script:mockTreeProcs -State $state -Settings $settings -Now (Get-Date) -AdditionalRootPids @(4100))
+        $positiveDeltaOk = (($entry.lastCpuSec -eq 14.0) -and ([double]$entry.lastCpuRatePct -ge 0.1) -and ($protected -contains 4100) -and ($protected -contains 4101))
+
+        @{ version = 1; updatedAt = $seenAt; processes = @{ '4100' = @{ name = 'claude.exe'; creationDate = $created; firstTrackedAt = $now.AddHours(-5).ToString('o'); lastActiveAt = $now.AddHours(-4).ToString('o'); lastCpuSec = 100.0; lastCpuRatePct = 0.0; lastIoOps = 0; lastIoBytes = 0; lastSeenAt = $seenAt; wsBytes = 1048576; ppid = 1; activityModel = 'cpu-tree-v2' } } } |
+            ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $tmp -Encoding UTF8
+        $state = Update-ActivityState -Settings $settings
+        $entry = $state.processes['4100']
+        $protected = @(Get-ActiveProtectedPids -AllProcs $script:mockTreeProcs -State $state -Settings $settings -Now (Get-Date) -AdditionalRootPids @(4100))
+        $treeRegressionOk = (((Get-Date) - (ConvertTo-DateTimeSafe $entry.lastActiveAt)).TotalSeconds -lt 5 -and ($protected -contains 4100))
+        return ($positiveDeltaOk -and $treeRegressionOk)
+    } finally {
+        Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+        Remove-Variable -Name mockTreeTarget,mockTreeProcs -Scope Script -ErrorAction SilentlyContinue
+    }
+}
+if ($claudeTreeActivityCheck) {
+    Write-Host "[PASS] Claude descendant CPU increase/replacement linked to root+descendant protection" -ForegroundColor Green
+} else {
+    Write-TestFailure "Claude descendant CPU activity protection behavior failed"
+}
+$stopActiveRaceCheck = & {
+    foreach ($fnName in @('ConvertTo-DateTimeSafe','Stop-TargetProcesses')) {
+        $fnAst = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $fnName }, $true)
+        Invoke-Expression $fnAst.Extent.Text
+    }
+    $created = (Get-Date).AddHours(-6).ToString('o')
+    $script:mockStopRoot = [pscustomobject]@{ ProcessId = 4100; ParentProcessId = 1; Name = 'claude.exe'; CreationDate = $created; MainWindowHandle = [IntPtr]::Zero }
+    $script:mockStopChild = [pscustomobject]@{ ProcessId = 4101; ParentProcessId = 4100; Name = 'bash.exe'; CreationDate = $created }
+    $script:mockStopNewChild = [pscustomobject]@{ ProcessId = 4102; ParentProcessId = 4100; Name = 'wsl.exe'; CreationDate = $created }
+    function Write-RunLog {}
+    function Get-TrackerSettings { [pscustomobject]@{ idleMinutes = 180; cpuThresholdPct = 0.1 } }
+    function Update-ActivityState { @{ version = 1; processes = @{} } }
+    function Get-CimInstance {
+        param([Parameter(Position=0)][string]$ClassName, [string]$Filter)
+        $script:mockCimCall++
+        if ($script:mockTreeChange -and $script:mockCimCall -ge 3) { return @($script:mockStopRoot, $script:mockStopNewChild) }
+        return @($script:mockStopRoot, $script:mockStopChild)
+    }
+    function Get-DescendantPids { param([int[]]$RootPids, $AllProcs) @($AllProcs | Where-Object { $RootPids -contains [int]$_.ParentProcessId } | ForEach-Object { [int]$_.ProcessId }) }
+    function Get-ActiveProtectedPids {
+        $index = $script:mockGuardCall
+        $script:mockGuardCall++
+        if ($index -eq 0) { return $script:mockFirstProtected }
+        return $script:mockSecondProtected
+    }
+    function Get-Process { param([int]$Id, [string]$ErrorAction) if ($Id -eq 4100) { $script:mockStopRoot } }
+    function taskkill.exe { $script:mockTaskkillCalled = $true }
+    $cases = @(
+        [pscustomobject]@{ First = @(4100); Second = @(); Calls = 1; TreeChange = $false },
+        [pscustomobject]@{ First = @(4101); Second = @(); Calls = 1; TreeChange = $false },
+        [pscustomobject]@{ First = @(); Second = @(4100); Calls = 2; TreeChange = $false },
+        [pscustomobject]@{ First = @(); Second = @(4101); Calls = 2; TreeChange = $false },
+        [pscustomobject]@{ First = @(); Second = @(); Calls = 2; TreeChange = $true }
+    )
+    try {
+        foreach ($case in $cases) {
+            $script:mockFirstProtected = @($case.First)
+            $script:mockSecondProtected = @($case.Second)
+            $script:mockGuardCall = 0
+            $script:mockCimCall = 0
+            $script:mockTreeChange = $case.TreeChange
+            $script:mockTaskkillCalled = $false
+            Stop-TargetProcesses -Processes @($script:mockStopRoot) -TimeoutSec 0 -ProtectActive *> $null
+            if ($script:mockTaskkillCalled -or $script:mockGuardCall -ne $case.Calls) { return $false }
+        }
+        return $true
+    } finally {
+        Remove-Variable -Name mockStopRoot,mockStopChild,mockStopNewChild,mockFirstProtected,mockSecondProtected,mockGuardCall,mockCimCall,mockTreeChange,mockTaskkillCalled -Scope Script -ErrorAction SilentlyContinue
+    }
+}
+if ($stopActiveRaceCheck) {
+    Write-Host "[PASS] root·descendant activation/tree changes immediately before pre-close/force block taskkill" -ForegroundColor Green
+} else {
+    Write-TestFailure "Active session taskkill blocking failed immediately before termination"
 }
 if ($src -match 'Start-Sleep -Milliseconds 100' -and $src -match 'Move-Item -LiteralPath \$tmp -Destination \$path -Force') {
     Write-Host "[PASS] activity-state read retry + atomic replace save" -ForegroundColor Green
 } else {
-    Write-Host "[FAIL] activity-state concurrent read/write protection missing" -ForegroundColor Red
+    Write-TestFailure "activity-state simultaneous read/write protection missing"
 }
 if (($src | Select-String -Pattern 'Update-ActivityState -Settings \$idleSettings' -AllMatches).Matches.Count -gt 0 -and
-    ($src | Select-String -Pattern 'Update-ActivityState -Settings \$codexSettings' -AllMatches).Matches.Count -gt 0) {
-    Write-Host "[PASS] Codex activity snapshot updated immediately before cleanup" -ForegroundColor Green
+    ($src | Select-String -Pattern 'Update-ActivityState -Settings \$activitySettings' -AllMatches).Matches.Count -ge 2 -and
+    $src -match 'Stop-TargetProcesses[^\r\n]*-ProtectActive:\$IdleOnly') {
+    Write-Host "[PASS] activity snapshot updated before IdleOnly selection/termination/force" -ForegroundColor Green
 } else {
-    Write-Host "[FAIL] activity snapshot update missing immediately before cleanup" -ForegroundColor Red
+    Write-TestFailure "activity snapshot update missing immediately before cleanup"
 }
 if (($src | Select-String -Pattern '-not \(Test-IsCodexProcess \$_\)' -AllMatches).Matches.Count -gt 0 -and
     ($src | Select-String -Pattern '-not \(Test-IsCodexProcess \$t\)' -AllMatches).Matches.Count -gt 0) {
     Write-Host "[PASS] Codex orphan processes use idle determination only instead of immediate termination" -ForegroundColor Green
 } else {
-    Write-Host "[FAIL] Codex orphan immediate termination exclusion guard missing" -ForegroundColor Red
+    Write-TestFailure "Codex orphan immediate termination exclusion guard missing"
 }
 if ($src -notmatch '(?ms)function\s+Get-CodexRootPids\b.*?return ,@\(\)' -and
-    $src -notmatch '(?ms)function\s+Get-ActiveCodexProtectedPids\b.*?return ,@\(\)') {
+    $src -notmatch '(?ms)function\s+Get-ActiveProtectedPids\b.*?return ,@\(\)') {
     Write-Host "[PASS] empty array return double-wrap absent" -ForegroundColor Green
 } else {
-    Write-Host "[FAIL] Found return ,@() in Codex helper — empty array may appear as 1 element" -ForegroundColor Red
+    Write-TestFailure "active helper contains return ,@() — empty array can appear as 1 element"
 }
 if ($src -notmatch '(?im)^\s*\$pid\s*=') {
     Write-Host "[PASS] PowerShell automatic variable `$PID not overwritten" -ForegroundColor Green
 } else {
-    Write-Host "[FAIL] Found `$pid assignment — conflicts with PowerShell automatic variable `$PID" -ForegroundColor Red
+    Write-TestFailure "`$pid assignment found — conflicts with PowerShell automatic variable `$PID"
 }
 
 # v1.1 new feature smoke test
@@ -220,7 +331,7 @@ foreach ($fn in $expectedFunctions) {
     if ($src -match "(?ms)^function\s+$fn\b") {
         Write-Host "[PASS] Function definition present: $fn" -ForegroundColor Green
     } else {
-        Write-Host "[FAIL] Function definition missing: $fn" -ForegroundColor Red
+        Write-TestFailure "Missing function definition: $fn"
     }
 }
 
@@ -231,7 +342,7 @@ foreach ($p in $expectedParams) {
     if ($src -match $pattern) {
         Write-Host "[PASS] Parameter definition: -$p" -ForegroundColor Green
     } else {
-        Write-Host "[FAIL] Parameter missing: -$p" -ForegroundColor Red
+        Write-TestFailure "Missing parameter: -$p"
     }
 }
 
@@ -276,14 +387,14 @@ Write-Host "== v1.2 tray/CSV smoke test =="
 if ($src -match '(?ms)^function\s+Write-RecoveryLog\b') {
     Write-Host "[PASS] CSV logging function definition: Write-RecoveryLog" -ForegroundColor Green
 } else {
-    Write-Host "[FAIL] Write-RecoveryLog function missing" -ForegroundColor Red
+    Write-TestFailure "Missing Write-RecoveryLog function"
 }
 
 # 8-1. Main log for hidden scheduled task execution tracking
 if ($src -match '(?ms)^function\s+Write-RunLog\b' -and $src -match 'memoryreset\.log' -and $src -match 'target: pid=' -and $src -match 'taskkill-ok') {
     Write-Host "[PASS] Main execution file log present: memoryreset.log records target/termination result" -ForegroundColor Green
 } else {
-    Write-Host "[FAIL] Main execution log missing — scheduled cleanup cause hard to trace" -ForegroundColor Red
+    Write-TestFailure "Missing main execution log — difficult to trace scheduled cleanup cause"
 }
 
 # 9. CSV lock/retry guard
@@ -305,7 +416,7 @@ if (Test-Path $trayPath) {
     if ($addTypeIdx -gt 0 -and $mutexIdx -gt 0 -and $addTypeIdx -lt $mutexIdx) {
         Write-Host "[PASS] Tray Add-Type executes before mutex check" -ForegroundColor Green
     } else {
-        Write-Host "[FAIL] Tray Add-Type order error — MessageBox may fail on second instance" -ForegroundColor Red
+        Write-TestFailure "Tray Add-Type order error — MessageBox may fail on a second instance"
     }
 
     # 10-2. mutex Local\ scope (avoid Global\ permission issue)
@@ -331,7 +442,7 @@ if (Test-Path $trayPath) {
         Write-Host "[WARN] Write-TrayLog not confirmed — difficult to track silent failures" -ForegroundColor Yellow
     }
 } else {
-    Write-Host "[FAIL] MemoryReset-Tray.ps1 file missing" -ForegroundColor Red
+    Write-TestFailure "MemoryReset-Tray.ps1 file not found"
 }
 
 # 11. .gitignore personal data protection
@@ -386,7 +497,7 @@ foreach ($fn in $v14fn) {
     if ($src -match "(?ms)^function\s+$fn\b") {
         Write-Host "[PASS] Function definition: $fn" -ForegroundColor Green
     } else {
-        Write-Host "[FAIL] Function missing: $fn" -ForegroundColor Red
+        Write-TestFailure "Missing function: $fn"
     }
 }
 
@@ -395,7 +506,7 @@ foreach ($p in @('TrackActivity','IdleOnly')) {
     if ($src -match ('\[switch\]\$' + $p + '\b')) {
         Write-Host "[PASS] Parameter: -$p" -ForegroundColor Green
     } else {
-        Write-Host "[FAIL] Parameter missing: -$p" -ForegroundColor Red
+        Write-TestFailure "Missing parameter: -$p"
     }
 }
 
@@ -403,12 +514,12 @@ foreach ($p in @('TrackActivity','IdleOnly')) {
 if ($src -match '-not\s+\(Test-IsAdmin\)\s+-and\s+-not\s+\$TrackActivity') {
     Write-Host "[PASS] -TrackActivity excluded from UAC elevation (safe for unattended runs)" -ForegroundColor Green
 } else {
-    Write-Host "[FAIL] -TrackActivity triggers UAC elevation — popup risk every 5 minutes in Task Scheduler" -ForegroundColor Red
+    Write-TestFailure "-TrackActivity triggers UAC elevation — Task Scheduler popup risk every 5 minutes"
 }
 
 # 18. [Security] Do not hardcode Telegram bot tokens — must load only from the settings file
 if ($src -match '\d{8,}:[A-Za-z0-9_-]{30,}') {
-    Write-Host "[FAIL] Bot token pattern found in source — secret hardcoding risk!" -ForegroundColor Red
+    Write-TestFailure "Bot token format string found in source — hardcoded secret risk!"
 } else {
     Write-Host "[PASS] No hardcoded bot token in source (loaded only from tracker-settings.json)" -ForegroundColor Green
 }
@@ -434,7 +545,7 @@ if (Test-Path $giPath) {
     if ($giFix -match '(?m)^tracker-settings\.json\s*$') {
         Write-Host "[PASS] .gitignore precisely protects tracker-settings.json (no inline comments)" -ForegroundColor Green
     } else {
-        Write-Host "[FAIL] tracker-settings.json token file unprotected — commit risk!" -ForegroundColor Red
+        Write-TestFailure "tracker-settings.json token file unprotected — commit risk!"
     }
 }
 
@@ -450,7 +561,7 @@ foreach ($script in @('Track-Schedule.ps1','Cleanup-Schedule.ps1','Run-Hidden.vb
     if (Test-Path (Join-Path $PSScriptRoot $script)) {
         Write-Host "[PASS] Script exists: $script" -ForegroundColor Green
     } else {
-        Write-Host "[FAIL] Script missing: $script" -ForegroundColor Red
+        Write-TestFailure "Missing script: $script"
     }
 }
 
@@ -463,14 +574,14 @@ if ($trackSrc -match "New-ScheduledTaskAction -Execute 'wscript\.exe'" -and
     $cleanupSrc -match 'Run-Hidden\.vbs') {
     Write-Host "[PASS] Task Scheduler registration uses hidden wscript wrapper" -ForegroundColor Green
 } else {
-    Write-Host "[FAIL] Task Scheduler registration may revert to direct powershell.exe execution" -ForegroundColor Red
+    Write-TestFailure "Task Scheduler registration risks reverting to direct powershell.exe execution"
 }
 
 # 25. Auto cleanup interval/Telegram guidance text synchronization
 if ($cleanupSrc -match '\[int\]\$IntervalHours\s*=\s*3' -and $src -match 'ClaudeCodeMemoryCleanup.+every 3 hours') {
     Write-Host "[PASS] Auto cleanup default 3 hours + Telegram guidance synchronization" -ForegroundColor Green
 } else {
-    Write-Host "[FAIL] Auto cleanup interval and Telegram guidance text mismatch" -ForegroundColor Red
+    Write-TestFailure "Auto cleanup interval and Telegram guidance text mismatch"
 }
 
 # ════════════════════════════════════════════════════════════════════
@@ -481,11 +592,11 @@ Write-Host "== v1.4.1 Byproduct(descendant tree) cleanup smoke test =="
 
 if ($src -match '(?ms)^function\s+Get-DescendantPids\b') {
     Write-Host "[PASS] Function definition: Get-DescendantPids" -ForegroundColor Green
-} else { Write-Host "[FAIL] Get-DescendantPids missing" -ForegroundColor Red }
+} else { Write-TestFailure "Get-DescendantPids missing" }
 
 if ($src -match '\[switch\]\$IncludeDescendants\b') {
     Write-Host "[PASS] Parameter: -IncludeDescendants" -ForegroundColor Green
-} else { Write-Host "[FAIL] -IncludeDescendants missing" -ForegroundColor Red }
+} else { Write-TestFailure "-IncludeDescendants missing" }
 
 # Get-DescendantPids must return a flat array (,@() double wrap prohibited — bug where desc becomes a single int[] element)
 if ($src -match 'return \$result\.ToArray\(\)' -and $src -notmatch 'return ,\$result\.ToArray\(\)') {
@@ -499,4 +610,9 @@ if ($src -match '-ne \$self' -and $src -match 'ExcludePids -notcontains') {
 
 if (Test-Path (Join-Path $PSScriptRoot 'Run-PurgeAll.bat')) {
     Write-Host "[PASS] Run-PurgeAll.bat (one click full cleanup) exists" -ForegroundColor Green
-} else { Write-Host "[FAIL] Run-PurgeAll.bat missing" -ForegroundColor Red }
+} else { Write-TestFailure "Run-PurgeAll.bat missing" }
+
+if ($script:testFailures -gt 0) {
+    Write-Host ("`n{0} test(s) failed." -f $script:testFailures) -ForegroundColor Red
+    exit 1
+}
